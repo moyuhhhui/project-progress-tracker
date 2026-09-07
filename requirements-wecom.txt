@@ -1,0 +1,2 @@
+# 可选：仅企业微信接收进程需要；SDK 版本依据官方仓库 pyproject.toml。
+wecom-aibot-python-sdk==1.0.1
