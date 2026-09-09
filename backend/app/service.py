@@ -217,6 +217,7 @@ class Service:
                     else:
                         require(manager(actor, project), '仅项目负责人可暂停、恢复或取消目标', 403)
                     self.change_state(node, change.status, at, change.reason)
+                    node['auto_complete_disabled'] = True
                     if change.status == 'completed':
                         node['progress'] = 100
                     if change.status == 'not_started':
@@ -226,6 +227,7 @@ class Service:
                     require(project['status'] != 'paused' and node['status'] not in ('completed', 'cancelled', 'paused'),
                             '目标或项目已暂停/结束，请先恢复')
                     report = validate(ProgressReport, action.data)
+                    node['auto_complete_disabled'] = True
                     if report.event_date:
                         require(report.event_date <= self.clock().date(), '汇报发生日期不能晚于今天')
                         require(report.event_date == self.clock().date() or report.historical,

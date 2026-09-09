@@ -84,7 +84,7 @@ export function projectMoodSummary(projects: Pick<Project, 'status' | 'flags'>[]
     cards: [
       { tone: 'preparation', label: '前期准备', count: projects.filter(project => project.status === 'not_started').length, message: '正在蓄力' },
       { tone: 'active', label: '进行中', count: projects.filter(project => project.status === 'active').length, message: '保持节奏' },
-      { tone: 'completed', label: '已完成', count: projects.filter(project => project.status === 'completed').length, message: '做得漂亮 🎉' },
+      { tone: 'completed', label: '已完成', count: projects.filter(project => project.status === 'completed').length, message: 'Congratulations！' },
       { tone: 'attention', label: '需要关注', count: attention, message: attention ? '及时处理' : '一切顺利' },
     ],
   }
@@ -104,9 +104,37 @@ export function timelineEmphasis(date: string, currentDate = today()): TimelineE
   const nearEnd = new Date(Date.parse(`${currentDate}T00:00:00Z`) + 10 * 86_400_000).toISOString().slice(0, 10)
   return date <= nearEnd ? 'near' : 'far'
 }
-export function planningOverview(projects: Project[], date = today()) {
+export type PlanningRange = 'week' | 'month'
+export function calendarRowTemplate(days: { column: number; items: unknown[] }[]) {
+  if (!days.length) return '1fr'
+  const leading = Math.max(0, (days[0]?.column || 1) - 1)
+  const rowCount = Math.ceil((leading + days.length) / 7)
+  const densities = Array.from({ length: rowCount }, () => 0)
+  days.forEach((day, index) => {
+    const row = Math.floor((leading + index) / 7)
+    densities[row] = Math.max(densities[row]!, day.items.length)
+  })
+  return densities.map(count => {
+    if (count === 0) return '.55fr'
+    if (count === 1) return '1.2fr'
+    if (count === 2) return '1.5fr'
+    return `${Math.min(2.1, 1.5 + (count - 2) * .25)}fr`
+  }).join(' ')
+}
+export function planningOverview(projects: Project[], date = today(), range?: PlanningRange) {
   const offset = (days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10)
-  const weekEnd = offset(7), endDate = offset(9)
+  const reference = new Date(`${date}T00:00:00Z`)
+  const rangeStart = range === 'week'
+    ? offset(-((reference.getUTCDay() + 6) % 7))
+    : range === 'month' ? `${date.slice(0, 7)}-01` : date
+  const rangeStartDate = new Date(`${rangeStart}T00:00:00Z`)
+  const endDate = range === 'week'
+    ? new Date(rangeStartDate.getTime() + 6 * 86_400_000).toISOString().slice(0, 10)
+    : range === 'month'
+      ? new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth() + 1, 0)).toISOString().slice(0, 10)
+      : offset(9)
+  const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) - rangeStartDate.getTime()) / 86_400_000) + 1
+  const weekEnd = offset(7)
   const active = projects.filter(p => !['completed', 'cancelled'].includes(p.status))
   const allItems = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
     ? project.milestones.filter(n => n.status !== 'cancelled')
@@ -119,14 +147,15 @@ export function planningOverview(projects: Project[], date = today()) {
       status: node?.status || project.status, paused: project.status === 'paused' || node?.status === 'paused',
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
+      owners: ownerPresentation(project, []),
     }))).sort((a, b) => a.date.localeCompare(b.date))
   const items = allItems.filter(item => item.project.status !== 'completed' && item.status !== 'completed')
   const todayItems = items.filter(item => item.date === date)
   const week = items.filter(item => item.date > date && item.date <= weekEnd)
   const flex = items.filter(item => !item.date)
-  const groups = Array.from(new Set(items.filter(item => item.date).map(item => item.date)))
+  const groups = Array.from(new Set(items.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
     .map(day => ({ date: day, items: items.filter(item => item.date === day) }))
-  const inRange = (day: string) => day >= date && day <= endDate
+  const inRange = (day: string) => day >= rangeStart && day <= endDate
   const upcoming = items.filter(item => !item.paused && (inRange(item.date) || inRange(item.startDate)))
     .map(item => ({ ...item, actionDate: inRange(item.date) ? item.date : item.startDate,
       action: inRange(item.date) ? '截止' : '开始' }))
@@ -135,9 +164,9 @@ export function planningOverview(projects: Project[], date = today()) {
     .map(day => ({ date: day, items: upcoming.filter(item => item.actionDate === day) }))
   const calendarItems = allItems.filter(item => item.status === 'completed' ||
     (item.project.status !== 'completed' && !item.paused))
-  const calendarDays = Array.from({ length: 10 }, (_, index) => {
-    const day = offset(index)
-    return { date: day, items: calendarItems.filter(item => {
+  const calendarDays = Array.from({ length: dayCount }, (_, index) => {
+    const day = new Date(rangeStartDate.getTime() + index * 86_400_000).toISOString().slice(0, 10)
+    return { date: day, column: ((new Date(`${day}T00:00:00Z`).getUTCDay() + 6) % 7) + 1, items: calendarItems.filter(item => {
       const start = item.startDate || item.date, end = item.date || item.startDate
       return start && end && start <= day && day <= end
     }).map(item => ({ ...item, actionDate: day,
@@ -145,7 +174,7 @@ export function planningOverview(projects: Project[], date = today()) {
   })
   const calendarActiveCount = new Set(calendarDays.flatMap(day => day.items)
     .filter(item => item.status !== 'completed').map(item => item.id)).size
-  return { groups, upcoming, upcomingGroups, calendarDays, calendarActiveCount, endDate, today: todayItems, week, flex,
+  return { groups, upcoming, upcomingGroups, calendarDays, calendarActiveCount, rangeStart, endDate, today: todayItems, week, flex,
     undated: allItems.filter(item => !item.date && !item.startDate),
     overdue: items.filter(item => item.date && item.date < date),
     later: items.filter(item => item.date > weekEnd),

@@ -102,6 +102,44 @@ class ReminderTests(unittest.TestCase):
             with self.subTest(at=at):
                 self.assertEqual(self.flags(moment(at)), expected)
 
+    def test_worker_auto_completes_untouched_item_at_due_hour_and_audits_system_source(self):
+        self.edit_fixture(node={'due_date': '2026-09-04'})
+        self.assertEqual(run_cycle(self.store, RecordingSender(), moment('2026-09-04T17:59')).get('auto_completed'), 0)
+        self.assertEqual(self.project()['milestones'][0]['status'], 'not_started')
+
+        result = run_cycle(self.store, RecordingSender(), moment('2026-09-04T18:00'))
+        project = self.project()
+        node = project['milestones'][0]
+        self.assertEqual(result['auto_completed'], 1)
+        self.assertEqual((node['status'], node['progress']), ('completed', 100))
+        self.assertEqual(node['completed_at'], '2026-09-04T18:00:00+08:00')
+        self.assertEqual(node['completion_source'], 'automatic')
+        self.assertEqual(project['status'], 'active')
+        with self.store.connect() as db:
+            audit = db.execute('SELECT user_id,intent,before_data,after_data FROM audit ORDER BY id DESC LIMIT 1').fetchone()
+        self.assertEqual((audit['user_id'], audit['intent']), ('system:auto-complete', 'milestone_status'))
+        self.assertEqual(json.loads(audit['before_data'])['milestones'][0]['status'], 'not_started')
+        self.assertEqual(json.loads(audit['after_data'])['milestones'][0]['status'], 'completed')
+
+    def test_manual_progress_report_permanently_prevents_automatic_completion(self):
+        self.edit_fixture(node={'due_date': '2026-09-04'})
+        self.confirm('report_progress', {'summary': '存在现场问题', 'blocker': '设备尚未到货'})
+
+        self.assertEqual(run_cycle(self.store, RecordingSender(), moment('2026-09-04T18:00')).get('auto_completed'), 0)
+        node = self.project()['milestones'][0]
+        self.assertEqual(node['status'], 'active')
+        self.assertTrue(node['auto_complete_disabled'])
+
+    def test_manual_status_change_permanently_prevents_automatic_completion(self):
+        self.edit_fixture(node={'due_date': '2026-09-04'})
+        self.confirm('milestone_status', {'status': 'paused', 'reason': '等待人工处理'})
+        self.confirm('milestone_status', {'status': 'active', 'reason': '继续处理'})
+
+        self.assertEqual(run_cycle(self.store, RecordingSender(), moment('2026-09-04T18:00')).get('auto_completed'), 0)
+        node = self.project()['milestones'][0]
+        self.assertEqual(node['status'], 'active')
+        self.assertTrue(node['auto_complete_disabled'])
+
     def test_holiday_and_makeup_dates_control_stale_and_due_soon(self):
         self.edit_fixture(node={'start_date': '2026-09-03', 'due_date': '2026-09-07'})
         settings = ReminderSettings(workday_overrides={'2026-09-04': False, '2026-09-05': True})
@@ -142,7 +180,7 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual(node_flags(project, project['milestones'][1], self.now, ReminderSettings()), ['stale'])
 
     def test_daily_deduplication_survives_reopen_and_combines_reasons(self):
-        self.edit_fixture(node={'due_date': '2026-09-03'})
+        self.edit_fixture(node={'due_date': '2026-09-03', 'auto_complete_disabled': True})
         sender = RecordingSender()
         self.assertEqual(run_cycle(self.store, sender, self.now)['accepted'], 1)
         self.assertEqual(json.loads(self.reminders()[0]['reasons']), ['overdue', 'stale'])

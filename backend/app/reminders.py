@@ -1,4 +1,5 @@
 """提醒只依赖已确认数据；不调用模型，也不把通知成功当作员工已读。"""
+import copy
 import json
 import os
 import secrets
@@ -7,7 +8,7 @@ from datetime import date, datetime, time, timedelta
 import httpx
 
 from .service import TZ, now_local
-from .store import encode
+from .store import encode, encode_project
 
 LABELS = {'overdue': '计划逾期', 'stale': '待更新', 'due_soon': '临近到期', 'blocked': '有阻碍'}
 
@@ -60,6 +61,42 @@ def decorate(project, now, settings):
     project['flags'] = [flag for flag in ('overdue','stale','due_soon','blocked')
                         if any(flag in n['flags'] for n in nodes)]
     project['risk_score'] = sum({'overdue': 8, 'stale': 4, 'due_soon': 2, 'blocked': 1}[f] for f in project['flags'])
+
+
+def auto_complete_due(store, now=None):
+    now = now or now_local()
+    settings = store.settings()
+    completed = 0
+    with store.connect(write=True) as db:
+        for row in db.execute('SELECT * FROM projects').fetchall():
+            project = store.project(row)
+            before = copy.deepcopy(project)
+            changed = 0
+            for node in project['milestones']:
+                if node['status'] not in ('not_started', 'active') or not node.get('due_date'):
+                    continue
+                if (node.get('auto_complete_disabled') or node.get('last_report_at') or node.get('paused_at')
+                        or node.get('resumed_at') or node.get('blocker')):
+                    continue
+                deadline = datetime.combine(date.fromisoformat(node['due_date']), time(settings.due_hour), TZ)
+                if now < deadline:
+                    continue
+                node.update(status='completed', progress=100, completed_at=now.isoformat(),
+                            completion_source='automatic', pause_reason='')
+                changed += 1
+            if not changed:
+                continue
+            project['updated_at'] = now.isoformat()
+            pid, version = int(project['id']), project['version'] + 1
+            stored = {key: value for key, value in project.items() if key not in ('id', 'code', 'version')}
+            db.execute('UPDATE projects SET version=?,data=? WHERE id=?', (version, encode_project(stored), pid))
+            after = {**stored, 'id': str(pid), 'code': f'P{pid:04d}', 'version': version}
+            db.execute('INSERT INTO audit(project_id,user_id,at,intent,before_data,after_data,draft_id) '
+                       'VALUES(?,?,?,?,?,?,?)',
+                       (pid, 'system:auto-complete', now.isoformat(), 'milestone_status', encode(before), encode(after),
+                        f"auto-complete:{pid}:{now.isoformat()}"))
+            completed += changed
+    return completed
 
 
 def scan(store, now=None):
@@ -220,7 +257,8 @@ def run_cycle(store, sender=None, now=None):
     if not acquire_lease(store, owner, now):
         return {'skipped': True}
     try:
-        return {'queued': scan(store, now), 'accepted': dispatch(store, sender, now)}
+        auto_completed = auto_complete_due(store, now)
+        return {'auto_completed': auto_completed, 'queued': scan(store, now), 'accepted': dispatch(store, sender, now)}
     finally:
         with store.connect(write=True) as db:
             db.execute('DELETE FROM worker_lease WHERE id=1 AND owner=?', (owner,))

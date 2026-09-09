@@ -13,9 +13,11 @@ const search = ref(''), stateFilter = ref(''), riskOnly = ref(false)
 const page = ref(1), selectedId = ref('')
 const currentDate = ref(today())
 const overview = computed(() => planningOverview(props.projects, currentDate.value))
+const timelineRange = ref<'week' | 'month'>('week')
+const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value))
 const mood = computed(() => projectMoodSummary(props.projects))
-const calendarStart = ref('')
-const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value))
+const calendarStart = ref(''), calendarRange = ref<'week' | 'month'>('week')
+const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value))
 const undatedGroups = computed(() => props.projects.map(project => ({
   project, items: overview.value.undated.filter(item => item.projectId === project.id),
 })).filter(group => group.items.length))
@@ -45,24 +47,24 @@ function projectRowClass({ row }: { row: Project }) {
     <article v-for="card in mood.cards" :key="card.tone" class="mood-card" :class="`tone-${card.tone}`"><span>{{ card.label }}</span><strong>{{ card.count }} 项</strong><small>{{ card.message }}</small></article>
   </section>
   <section v-loading="loading" class="planning-timeline" aria-label="关键时间轴">
-    <div class="timeline-heading"><h2>关键时间轴</h2><span class="timeline-range">已定日期的项目事项</span></div>
+    <div class="timeline-heading"><h2>关键时间轴</h2><div class="range-actions"><span class="timeline-range">{{ timelineOverview.rangeStart }} — {{ timelineOverview.endDate }}</span><el-button-group><el-button :type="timelineRange === 'week' ? 'primary' : 'default'" @click="timelineRange = 'week'">本周</el-button><el-button :type="timelineRange === 'month' ? 'primary' : 'default'" @click="timelineRange = 'month'">本月</el-button></el-button-group></div></div>
     <p class="timeline-hint">按计划截止日期排列 · 点击查看项目</p>
-    <div v-if="overview.groups.length" class="timeline">
-      <div v-for="group in overview.groups" :key="group.date" class="timeline-group" :class="[`timeline-${timelineEmphasis(group.date, currentDate)}`, { 'is-today': group.date === currentDate }]">
+    <div v-if="timelineOverview.groups.length" class="timeline">
+      <div v-for="group in timelineOverview.groups" :key="group.date" class="timeline-group" :class="[`timeline-${timelineEmphasis(group.date, currentDate)}`, { 'is-today': group.date === currentDate }]">
         <div class="timeline-day"><time :datetime="group.date">{{ group.date === currentDate ? '今天 · ' : '' }}{{ timelineDate(group.date) }}</time><span>{{ group.date === currentDate ? '今日安排' : `${group.items.length} 项安排` }}</span></div>
         <div class="timeline-items"><button v-for="item in group.items" :key="item.id" class="timeline-item" :class="[`project-tone-${projectColorTone(item.projectId)}`, { 'is-overdue': group.date < currentDate, 'is-paused': item.paused }]" @click="selectedId = item.projectId"><span class="timeline-project">{{ item.code }} {{ item.projectName }}</span><span class="timeline-arrow">→</span><strong>{{ item.target }}</strong><span v-if="item.paused" class="timeline-action">暂停中</span><span v-else-if="group.date < currentDate" class="timeline-action">逾期</span></button></div>
       </div>
     </div>
     <p v-else class="timeline-empty">{{ loading ? '正在读取事项…' : '暂无已定日期的项目事项' }}</p>
   </section>
-  <section v-loading="loading" class="planning-timeline" aria-label="未来十天日历">
-    <div class="timeline-heading"><h2>安排日历</h2><span class="timeline-range">{{ calendarStart || currentDate }} — {{ calendarOverview.endDate }} · 含今天</span></div>
+  <section v-loading="loading" class="planning-timeline" aria-label="安排日历">
+    <div class="timeline-heading"><h2>安排日历</h2><div class="range-actions"><span class="timeline-range">{{ calendarOverview.rangeStart }} — {{ calendarOverview.endDate }}</span><el-button-group><el-button :type="calendarRange === 'week' ? 'primary' : 'default'" @click="calendarRange = 'week'">本周</el-button><el-button :type="calendarRange === 'month' ? 'primary' : 'default'" @click="calendarRange = 'month'">本月</el-button></el-button-group></div></div>
     <p class="timeline-hint">{{ calendarOverview.calendarActiveCount }} 项进行中 · 跨天事项每天展示，数量不重复计算 · 点击查看项目</p>
-    <el-date-picker v-model="calendarStart" type="date" value-format="YYYY-MM-DD" placeholder="今天起十天（可选日期回看）" aria-label="日历起始日期" clearable />
-    <div class="calendar-grid">
-      <section v-for="day in calendarOverview.calendarDays" :key="day.date" class="calendar-day" :class="{ 'is-today': day.date === currentDate }" :aria-label="timelineDate(day.date)">
+    <el-date-picker v-model="calendarStart" type="date" value-format="YYYY-MM-DD" placeholder="选择参考日期" aria-label="日历参考日期" clearable />
+    <div class="calendar-grid" :class="{ 'is-month': calendarRange === 'month' }">
+      <section v-for="day in calendarOverview.calendarDays" :key="day.date" class="calendar-day" :class="{ 'is-today': day.date === currentDate }" :style="day.date === calendarOverview.rangeStart ? { gridColumnStart: day.column } : undefined" :aria-label="timelineDate(day.date)">
         <header class="calendar-date"><time :datetime="day.date">{{ timelineDate(day.date) }}</time><span v-if="day.date === currentDate">今天</span></header>
-        <div class="calendar-events"><button v-for="item in day.items" :key="item.id" class="calendar-event" :class="[`status-${arrangementPresentation(item).tone}`, `project-tone-${projectColorTone(item.projectId)}`]" @click="selectedId = item.projectId"><span class="calendar-project">{{ item.code }} {{ item.projectName }}</span><strong>{{ item.target }}</strong><span class="calendar-event-meta"><span>{{ item.action }}</span><strong>{{ arrangementPresentation(item).label }}</strong></span></button><p v-if="!day.items.length" class="calendar-empty">暂无安排</p></div>
+        <div class="calendar-events"><button v-for="item in day.items" :key="item.id" class="calendar-event" :class="[`status-${arrangementPresentation(item).tone}`, `project-tone-${projectColorTone(item.projectId)}`]" @click="selectedId = item.projectId"><span class="calendar-project">{{ item.code }} {{ item.projectName }}</span><strong>{{ item.target }}</strong><span class="calendar-owners"><span v-for="person in item.owners" :key="`${person.role}-${person.name}`"><b>{{ person.role || (person.primary ? 'A角' : '负责人') }}</b>{{ person.name }}</span></span><span class="calendar-event-meta"><span>{{ item.action }}</span><strong>{{ arrangementPresentation(item).label }}</strong></span></button><p v-if="!day.items.length" class="calendar-empty">暂无安排</p></div>
       </section>
     </div>
   </section>
@@ -94,16 +96,16 @@ function projectRowClass({ row }: { row: Project }) {
 <style scoped>
 .heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap}.progress-cheer{margin:0;padding:8px 12px;border-radius:10px;background:#f2f4f7;color:#526176;font-size:12px}.mood-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}.mood-card{position:relative;overflow:hidden;display:grid;grid-template-columns:1fr auto;gap:7px 12px;padding:17px 18px;background:#fff;border:1px solid #e1e7f0;border-radius:12px;box-shadow:0 7px 22px #1e3f700a}.mood-card::before{content:'';position:absolute;inset:0 auto 0 0;width:4px;background:#8294ad}.mood-card>span{font-size:12px;color:#718098}.mood-card>strong{grid-row:1 / span 2;grid-column:2;font-size:21px;font-weight:650;color:#273750}.mood-card>small{font-size:11px;color:#8290a5}.mood-card.tone-active::before{background:#5ca8dd}.mood-card.tone-completed::before{background:#43a47a}.mood-card.tone-attention::before{background:#d9535f}.mood-card.tone-active{background:#e9f6ff}.mood-card.tone-completed{background:#f8fdfb}.mood-card.tone-attention{background:#fffafb}
 .project-tone-orange{--project-tone:#e46f18;--project-soft:#fff1e7;--project-border:#f0ae7c}.project-tone-lemon{--project-tone:#ae9200;--project-soft:#fff9d7;--project-border:#e3d36d}.project-tone-grass{--project-tone:#78a842;--project-soft:#f1f8e8;--project-border:#b8d58e}.project-tone-lavender{--project-tone:#8a70b5;--project-soft:#f4f0fa;--project-border:#c7b8dd}.project-tone-brown{--project-tone:#754c35;--project-soft:#f5eee9;--project-border:#b99e8e}.project-tone-slate{--project-tone:#687386;--project-soft:#f2f4f7;--project-border:#b8c0cc}.project-tone-charcoal{--project-tone:#3f4856;--project-soft:#eef0f3;--project-border:#a8afb9}
-.calendar-event.status-active{background:#e9f6ff;border-left-color:#5ca8dd;color:#265f89}.calendar-event.status-completed{background:#e9f6ef;border-left-color:#43a47a;color:#28775a}.calendar-event.status-paused{background:#f2f3f6;border-left-color:#8a93a2;color:#606b7b}.calendar-grid{margin-top:14px}
+.calendar-event.status-active{background:#e9f6ff;border-left-color:#5ca8dd;color:#265f89}.calendar-event.status-completed{background:#e9f6ef;border-left-color:#43a47a;color:#28775a}.calendar-event.status-paused{background:#f2f3f6;border-left-color:#8a93a2;color:#606b7b}.calendar-grid{margin-top:14px}.range-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.range-actions :deep(.el-button){padding:6px 12px}.calendar-owners{display:flex;flex-wrap:wrap;gap:4px 7px;font-size:10px}.calendar-owners>span{display:inline-flex;align-items:center;gap:3px}.calendar-owners b{font-size:9px;font-weight:600;color:#526176;background:#ffffffb8;border-radius:3px;padding:0 4px}
 .undated-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .undated-project{min-width:0;border:1px solid #e5e9f0;border-left:4px solid var(--project-tone,#8294ad);border-radius:8px;padding:14px 16px;background:#fafbfe}.undated-project h3{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;margin:0 0 9px;font-size:14px;color:#26354a}.undated-project h3>span{color:var(--project-tone,#7c889a);background:var(--project-soft,#f2f4f7);border:1px solid var(--project-border,#e1e7f0);border-radius:4px;padding:1px 5px}.undated-project h3>span,.undated-project h3>small{font-size:11px;font-weight:400}.undated-project h3>small{margin-left:auto;color:#7c889a}.undated-project ul{list-style:none;padding:0;margin:0}.undated-project li+li{border-top:1px solid #e9edf4}.undated-project button{display:block;width:100%;border:0;background:none;text-align:left;font:inherit;font-size:13px;line-height:1.6;color:#3068da;padding:7px 0;cursor:pointer;overflow-wrap:anywhere}.undated-project button:hover{text-decoration:underline}.undated-project button:focus-visible{outline:2px solid #3068da;outline-offset:2px}
 @media(max-width:700px){.undated-grid{grid-template-columns:1fr}.timeline .timeline-group{grid-template-columns:1fr;gap:7px}}
 .progress-heading h1{font-size:24px;margin-bottom:6px}
-.calendar-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border-top:1px solid #e5e9f0;border-left:1px solid #e5e9f0;border-radius:8px;overflow:hidden}
+.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border-top:1px solid #e5e9f0;border-left:1px solid #e5e9f0;border-radius:8px;overflow:hidden}.calendar-grid.is-month .calendar-day{min-height:138px}
 .calendar-day{min-width:0;min-height:170px;border-right:1px solid #e5e9f0;border-bottom:1px solid #e5e9f0;background:#fff}.calendar-day.is-today{background:#f2faff;box-shadow:inset 0 3px #5ca8dd}.calendar-day:has(.calendar-empty):not(.is-today){background:#fafbfc}
 .calendar-date{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;padding:12px 10px;font-size:12px;font-weight:600;color:#526176;border-bottom:1px solid #edf0f4}.calendar-date>span{font-size:10px;color:#24658f;background:#dff2ff;border-radius:4px;padding:2px 5px}
 .calendar-events{padding:9px;display:flex;flex-direction:column;gap:8px}.calendar-event{width:100%;display:flex;flex-direction:column;gap:5px;text-align:left;font:inherit;font-size:12px;line-height:1.5;border:0;border-left:3px solid #5ca8dd;border-radius:5px;background:#e9f6ff;padding:8px;color:#265f89;cursor:pointer;overflow-wrap:anywhere}.calendar-event:hover{filter:brightness(.97)}.calendar-event:focus-visible{outline:2px solid #3d8fc8;outline-offset:2px}.calendar-project{align-self:flex-start;font-size:10px;color:var(--project-tone,#526176);background:var(--project-soft,#f2f4f7);border:1px solid var(--project-border,#e1e7f0);border-radius:4px;padding:1px 5px}.calendar-event strong{font-weight:600}.calendar-event-meta{display:flex;justify-content:space-between;gap:5px;font-size:10px}.calendar-empty{font-size:12px;color:#b3bac5;margin:16px 0;text-align:center}
-@media(max-width:600px){.calendar-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.calendar-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.calendar-day{grid-column-start:auto!important}.range-actions{justify-content:flex-start}}
 .planning-timeline{background:#fff;border:1px solid #e1e7f0;border-radius:14px;padding:22px 24px;margin-bottom:20px;box-shadow:0 7px 22px #1e3f7008}
 .timeline-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .timeline-heading h2{display:flex;align-items:center;gap:10px;margin:0;font-size:17px;color:#26354a}

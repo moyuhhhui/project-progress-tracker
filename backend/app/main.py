@@ -127,7 +127,7 @@ def create_app(db_path=None):
     def history(project_id: str, actor=Depends(editor)):
         with store.connect() as db:
             p = service.get_project(db,project_id,actor)
-            audit = [dict(r) for r in db.execute('SELECT a.*,u.name AS actor_name FROM audit a LEFT JOIN users u ON a.user_id=u.id '
+            audit = [dict(r) for r in db.execute("SELECT a.*,CASE WHEN a.user_id='system:auto-complete' THEN '系统自动完成' ELSE u.name END AS actor_name FROM audit a LEFT JOIN users u ON a.user_id=u.id "
                      'WHERE project_id=? ORDER BY a.id DESC LIMIT 100',(p['id'],))]
             reports = [dict(r) for r in db.execute('SELECT r.*,u.name AS actor_name FROM reports r LEFT JOIN users u ON r.user_id=u.id '
                        'WHERE project_id=? ORDER BY r.id DESC LIMIT 100',(p['id'],))]

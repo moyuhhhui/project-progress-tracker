@@ -41,7 +41,7 @@ test('项目情绪概览按状态和风险计数并给出鼓励文案', () => {
     cards: [
       { tone: 'preparation', label: '前期准备', count: 2, message: '正在蓄力' },
       { tone: 'active', label: '进行中', count: 1, message: '保持节奏' },
-      { tone: 'completed', label: '已完成', count: 1, message: '做得漂亮 🎉' },
+      { tone: 'completed', label: '已完成', count: 1, message: 'Congratulations！' },
       { tone: 'attention', label: '需要关注', count: 2, message: '及时处理' },
     ],
   })
@@ -182,6 +182,57 @@ test('日历固定显示连续十天并保留空日期，时间轴保留十天�
   assert.equal(result.calendarDays[9].date, '2027-01-09')
   assert.deepEqual(result.groups.map(group => group.date), ['2027-01-01', '2027-02-01'])
   assert.equal(domain.planningOverview([], '2026-12-31').calendarDays.length, 10)
+})
+
+test('本周视图按周一至周日同时限制日历和时间轴范围', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
+    { id: 'monday', name: '周一事项', status: 'active', due_date: '2026-09-07' },
+    { id: 'sunday', name: '周日事项', status: 'active', due_date: '2026-09-13' },
+    { id: 'next', name: '下周事项', status: 'active', due_date: '2026-09-14' },
+  ] }], '2026-09-09', 'week')
+  assert.equal(result.rangeStart, '2026-09-07')
+  assert.equal(result.endDate, '2026-09-13')
+  assert.equal(result.calendarDays.length, 7)
+  assert.deepEqual(result.groups.map(group => group.date), ['2026-09-07', '2026-09-13'])
+})
+
+test('本月视图展示当月全部日期并同时限制时间轴范围', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
+    { id: 'first', name: '月初事项', status: 'active', due_date: '2028-02-01' },
+    { id: 'last', name: '月底事项', status: 'active', due_date: '2028-02-29' },
+    { id: 'next', name: '下月事项', status: 'active', due_date: '2028-03-01' },
+  ] }], '2028-02-12', 'month')
+  assert.equal(result.rangeStart, '2028-02-01')
+  assert.equal(result.endDate, '2028-02-29')
+  assert.equal(result.calendarDays.length, 29)
+  assert.equal(result.calendarDays[0].column, 2)
+  assert.deepEqual(result.groups.map(group => group.date), ['2028-02-01', '2028-02-29'])
+})
+
+test('日历事项携带项目结构化A角B角负责人', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', owner_name: '旧负责人文本',
+    owner_assignments: [
+      { name: '小柯', role: 'A角', primary: true },
+      { name: '小朱', role: 'B角', primary: false },
+    ],
+    milestones: [{ id: 'item', name: '现场调研', status: 'active', due_date: '2026-09-09' }],
+  }], '2026-09-09', 'week')
+  assert.deepEqual(result.calendarDays[2].items[0].owners, [
+    { name: '小柯', role: 'A角', primary: true },
+    { name: '小朱', role: 'B角', primary: false },
+  ])
+})
+
+test('大屏月历按整周事项密度压缩空行并放大有事项行', () => {
+  assert.equal(typeof domain.calendarRowTemplate, 'function')
+  const days = Array.from({ length: 30 }, (_, index) => ({
+    date: `2026-09-${String(index + 1).padStart(2, '0')}`,
+    column: index === 0 ? 2 : 1,
+    items: [],
+  }))
+  days[7].items = [{}]
+  days[14].items = [{}, {}]
+  assert.equal(domain.calendarRowTemplate(days), '.55fr 1.2fr 1.5fr .55fr .55fr')
 })
 
 test('编辑只提交发生变化的字段，保留 false 和空描述的明确修改', () => {
