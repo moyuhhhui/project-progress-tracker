@@ -6,7 +6,7 @@
 
 ## 当前可用范围
 
-- 公司内部共享工作台：设置 `TRACKER_SHARED_USER_ID` 后，网页和大屏直接打开，无需输入访问密钥；网页与群消息共用公司内部共享身份，无需绑定码。
+- 公司内部共享工作台：设置 `TRACKER_INTERNAL_SHARED=true` 后，网页和大屏直接打开；网页与群消息共用公司内部共享身份，无需绑定码。
 - 创建项目、维护成员和里程碑、汇报进度、调整计划及状态。缺项或有歧义时保留草稿；完整信息通过权限和字段校验后自动保存正式项目，无需二次确认。草稿替换、业务写入及审计在同一事务中完成。
 - AI 网页输入、缺项追问、持久化草稿及自动保存。解析器使用 `langchain_deepseek.ChatDeepSeek` 原生接入，只提出固定字段，没有数据库和任意工具执行权限。
 - 临期、逾期和待更新计算，工作日覆盖、暂停、每日节点去重、发送前复核及异常记录。
@@ -19,7 +19,7 @@
 以下命令在项目目录执行。已发现本机 Python 为 `D:\python\python.exe`，Node 为 22.17.1。项目不会自行安装依赖。
 
 ```powershell
-Set-Location 'C:\Users\21313\Desktop\公司项目进度追踪'
+Set-Location 'C:\Users\23130\Desktop\公司项目进度追踪'
 & 'D:\python\python.exe' -c "import fastapi, uvicorn, pydantic, httpx"
 ```
 
@@ -32,7 +32,7 @@ Set-Location 'C:\Users\21313\Desktop\公司项目进度追踪'
 前端依赖由操作者安装。直接进入 `frontend`，避免 npm 的 `--prefix` 参数在本机未正确生效：
 
 ```powershell
-Set-Location 'C:\Users\21313\Desktop\公司项目进度追踪\frontend'
+Set-Location 'C:\Users\23130\Desktop\公司项目进度追踪\frontend'
 npm install
 npm run build
 Set-Location ..
@@ -41,12 +41,12 @@ Set-Location ..
 初始化首位管理员（仅空用户库可运行），命令会在本机终端显示新密钥，妥善保存：
 
 ```powershell
-$env:TRACKER_DB = 'C:\Users\21313\Desktop\公司项目进度追踪\data\tracker.sqlite3'
+$env:TRACKER_DB = 'C:\Users\23130\Desktop\公司项目进度追踪\data\tracker.sqlite3'
 & 'D:\python\python.exe' -m backend.manage init-admin --name '管理员'
-& 'D:\python\python.exe' -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+& 'D:\python\python.exe' -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001
 ```
 
-启动 Web 服务前，将 `TRACKER_SHARED_USER_ID` 设置为启用的管理员系统 ID（当前本机已写入 `.env`，通过 `python -m dotenv -f .env run -- python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000` 加载）。浏览器直接打开 [本机工作台](http://127.0.0.1:8000)，无需登录。构建结果由后端提供；如果后端启动时尚未生成 `frontend/dist`，构建后需重启后端。
+设置 `TRACKER_INTERNAL_SHARED=true`（当前本机已写入 `.env`，通过 `python -m dotenv -f .env run -- python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001` 加载）。浏览器直接打开 [本机工作台](http://127.0.0.1:8001)，无需登录。构建结果由后端提供；如果后端启动时尚未生成 `frontend/dist`，构建后需重启后端。
 
 项目支持选填“对接单位、对接人、联系方式”（电话、微信或邮箱）。可在新建或编辑项目时填写，也可通过网页助手或群消息提供；对接人不必是系统成员，不填写不影响项目保存。项目详情可查看这些信息。
 
@@ -60,13 +60,13 @@ $env:TRACKER_DB = 'C:\Users\21313\Desktop\公司项目进度追踪\data\tracker.
 
 ```powershell
 # 终端一：项目根目录
-& 'D:\python\python.exe' -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+& 'D:\python\python.exe' -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001
 
 # 终端二：frontend 目录
 npm run dev
 ```
 
-打开 [前端开发页面](http://127.0.0.1:5173)。Vite 将 `/api` 代理到本机 8000 端口。默认监听本机，不会部署到公网。
+打开 [前端开发页面](http://127.0.0.1:5174)。Vite 将 `/api` 代理到本机 8001 端口。默认监听本机，不会部署到公网。
 
 ## 配置
 
@@ -109,7 +109,7 @@ $env:TRACKER_AI_ENABLED = 'true'
 1. 由操作者安装可选 SDK，不影响已有网页及提醒进程：
 
    ```powershell
-   Set-Location 'C:\Users\21313\Desktop\公司项目进度追踪'
+   Set-Location 'C:\Users\23130\Desktop\公司项目进度追踪'
    & 'D:\python\python.exe' -m pip install -r requirements-wecom.txt
    ```
 
@@ -117,7 +117,7 @@ $env:TRACKER_AI_ENABLED = 'true'
 3. 在接收进程终端设置下面变量；AI 配置也须在这个终端存在。密钥只在本机输入，不要贴进聊天、截图或提交到代码库。
 
    ```powershell
-   $env:TRACKER_DB = 'C:\Users\21313\Desktop\公司项目进度追踪\data\tracker.sqlite3'
+$env:TRACKER_DB = 'C:\Users\23130\Desktop\公司项目进度追踪\data\tracker.sqlite3'
    $env:TRACKER_WECOM_BOT_ENABLED = 'true'
    $env:WECOM_BOT_ID = Read-Host '输入机器人 BotID'
    $env:WECOM_BOT_SECRET = Read-Host '输入机器人长连接 Secret' -MaskInput
@@ -133,9 +133,9 @@ $env:TRACKER_AI_ENABLED = 'true'
 
 4. 每个机器人只运行一个接收进程；Web、接收进程与提醒 worker 使用同一数据库绝对路径。接收进程与主动提醒独立，开启接收不会开启定时催办。长连接由服务器向企业微信发起，不需要搭建公网消息回调接口；网页查看和补充仍需要员工能访问 Web 服务。
 
-公司内部共享模式无需账号绑定；群成员直接 @机器人发送项目安排。关闭共享模式时，由管理员在成员管理页面配置企业微信 UserID。
+公司内部共享模式无需账号绑定；群成员直接 @机器人发送项目安排。管理员可在成员管理页面配置企业微信 UserID。
 
-本机联调时，网页可先使用 `http://127.0.0.1:8000`，该地址仅限运行服务的这台电脑访问。群内会直接显示识别出的操作类型，网页查看完整草稿。当前本机首次管理员及普通成员访问密钥保存在受 `.gitignore` 排除的 `data/local-access.json`，不要把此文件发到群里。
+本机联调时，网页可先使用 `http://127.0.0.1:8001`，该地址仅限运行服务的这台电脑访问。群内会直接显示识别出的操作类型，网页查看完整草稿。
 
 员工使用示例：
 
@@ -157,8 +157,8 @@ $env:TRACKER_AI_ENABLED = 'true'
 独立终端运行提醒进程，每 10 分钟检查一次；先保持发送开关关闭：
 
 ```powershell
-Set-Location 'C:\Users\21313\Desktop\公司项目进度追踪'
-$env:TRACKER_DB = 'C:\Users\21313\Desktop\公司项目进度追踪\data\tracker.sqlite3'
+Set-Location 'C:\Users\23130\Desktop\公司项目进度追踪'
+   $env:TRACKER_DB = 'C:\Users\23130\Desktop\公司项目进度追踪\data\tracker.sqlite3'
 $env:TRACKER_WECOM_SEND_ENABLED = 'false'
 & 'D:\python\python.exe' -m backend.worker --once
 # 持续检查时去掉 --once

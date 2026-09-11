@@ -69,13 +69,37 @@ export function arrangementPresentation(item: { status: string; paused: boolean 
   if (item.paused) return { label: '暂停中', tone: 'paused' as const }
   return { label: '进行中', tone: 'active' as const }
 }
+export function timelineStatusLabel(item: { status: string; paused: boolean; flags?: Flag[] }) {
+  const label = arrangementPresentation(item).label
+  return label === '进行中' && item.flags?.includes('overdue') ? '逾期' : label
+}
 export function ownerPresentation(project: Pick<Project, 'owner_assignments' | 'owner_roles' | 'owner_name'>,
   users: User[]): OwnerAssignment[] {
-  if (project.owner_assignments?.length) return project.owner_assignments.map(item => ({ ...item }))
-  if (Object.keys(project.owner_roles || {}).length) return Object.entries(project.owner_roles || {}).map(([id, role]) => ({
-    name: users.find(user => user.id === id)?.name || '成员不可用', role, primary: false,
-  }))
-  return [{ name: project.owner_name || '待明确', role: '', primary: false }]
+  const assignments = project.owner_assignments?.length
+    ? project.owner_assignments.map(item => ({ ...item }))
+    : Object.keys(project.owner_roles || {}).length
+      ? Object.entries(project.owner_roles || {}).map(([id, role]) => ({
+          name: users.find(user => user.id === id)?.name || '成员不可用', role, primary: false,
+        }))
+      : [{ name: project.owner_name || '待明确', role: '', primary: false }]
+  const order = ['A角', 'A1', 'A2', 'B角', 'B1', 'B2']
+  return assignments.sort((left, right) => {
+    const leftIndex = order.indexOf(ownerRoleLabel(left.role))
+    const rightIndex = order.indexOf(ownerRoleLabel(right.role))
+    return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex)
+  })
+}
+export function ownerRoleLabel(role: string, primary = false) {
+  const value = role.toUpperCase()
+  if (value === 'A') return 'A角'
+  if (value === 'B') return 'B角'
+  return value || (primary ? 'A角' : '负责人')
+}
+export function ownerRoleTone(role: string) {
+  const value = ownerRoleLabel(role)
+  if (/^A(?:角|1|2)$/.test(value)) return 'primary'
+  if (/^B(?:角|1|2)$/.test(value)) return 'secondary'
+  return 'neutral'
 }
 export function projectMoodSummary(projects: Pick<Project, 'status' | 'flags'>[]) {
   const attention = projects.filter(project => !['completed', 'cancelled'].includes(project.status) && project.flags?.length).length
@@ -98,9 +122,8 @@ export function projectColorTone(projectId: string): ProjectColorTone {
     : [...projectId].reduce((sum, character) => sum + character.codePointAt(0)!, 0)
   return tones[seed % tones.length]!
 }
-export type TimelineEmphasis = 'warning' | 'near' | 'far'
+export type TimelineEmphasis = 'near' | 'far'
 export function timelineEmphasis(date: string, currentDate = today()): TimelineEmphasis {
-  if (date < currentDate) return 'warning'
   const nearEnd = new Date(Date.parse(`${currentDate}T00:00:00Z`) + 10 * 86_400_000).toISOString().slice(0, 10)
   return date <= nearEnd ? 'near' : 'far'
 }
@@ -145,6 +168,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
       startDate: (node ? node.start_date : project.start_date) || '',
       timeText: node?.time_text || '',
       status: node?.status || project.status, paused: project.status === 'paused' || node?.status === 'paused',
+      flags: node ? node.flags || [] : project.flags || [],
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
       owners: ownerPresentation(project, []),
@@ -153,8 +177,8 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
   const todayItems = items.filter(item => item.date === date)
   const week = items.filter(item => item.date > date && item.date <= weekEnd)
   const flex = items.filter(item => !item.date)
-  const groups = Array.from(new Set(items.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
-    .map(day => ({ date: day, items: items.filter(item => item.date === day) }))
+  const groups = Array.from(new Set(allItems.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
+    .map(day => ({ date: day, items: allItems.filter(item => item.date === day) }))
   const inRange = (day: string) => day >= rangeStart && day <= endDate
   const upcoming = items.filter(item => !item.paused && (inRange(item.date) || inRange(item.startDate)))
     .map(item => ({ ...item, actionDate: inRange(item.date) ? item.date : item.startDate,

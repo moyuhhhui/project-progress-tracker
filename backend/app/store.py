@@ -147,12 +147,23 @@ class Store:
             for row in db.execute('SELECT id,data FROM projects'):
                 project = decode_project(row['data'])
                 assignments = project.get('owner_assignments') or legacy_owner_assignments(project.get('owner_name'))
+                assignments = [
+                    {**item, 'role': {'A': 'A角', 'B': 'B角'}.get(item['role'].upper(), item['role'].upper())}
+                    for item in assignments
+                ]
+                roles = {user_id: {'A': 'A角', 'B': 'B角'}.get(role.upper(), role.upper())
+                         for user_id, role in project.get('owner_roles', {}).items()}
                 if assignments:
                     summary = owner_summary(assignments)
-                    if project.get('owner_assignments') != assignments or project.get('owner_name') != summary:
+                    if (project.get('owner_assignments') != assignments or project.get('owner_name') != summary
+                            or project.get('owner_roles', {}) != roles):
                         project['owner_assignments'] = assignments
                         project['owner_name'] = summary
+                        project['owner_roles'] = roles
                         updates.append((encode_project(project), row['id']))
+                elif project.get('owner_roles', {}) != roles:
+                    project['owner_roles'] = roles
+                    updates.append((encode_project(project), row['id']))
             if not updates:
                 return
             backup_path = f'{self.path}.before-owner-assignments-{secrets.token_hex(6)}.bak'

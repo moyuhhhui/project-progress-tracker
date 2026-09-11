@@ -13,6 +13,34 @@ test('安排状态区分进行中、已完成和暂停类型', () => {
     { label: '暂停中', tone: 'paused' })
 })
 
+test('时间轴按事项状态和逾期标记展示，不根据日期推断', () => {
+  assert.equal(domain.timelineStatusLabel({ status: 'completed', paused: false, flags: ['overdue'] }), '已完成')
+  assert.equal(domain.timelineStatusLabel({ status: 'active', paused: false, flags: [] }), '进行中')
+  assert.equal(domain.timelineStatusLabel({ status: 'active', paused: false, flags: ['overdue'] }), '逾期')
+})
+
+test('工作台与大屏共享刷新周期和完成节点显示规则', () => {
+  const workspace = readFileSync(new URL('../src/views/ProjectsPage.vue', import.meta.url), 'utf8')
+  const display = readFileSync(new URL('../src/views/DisplayBoard.vue', import.meta.url), 'utf8')
+  assert.match(workspace, /timelineStatusLabel/)
+  assert.match(workspace, /setInterval\(\(\) => \{ currentDate\.value = today\(\) \}, 1_000\)/)
+  assert.match(display, /setInterval\(\(\) => \{ void refresh\(\) \}, 5_000\)/)
+  assert.match(workspace, /\.calendar-event\.status-completed\{background:#e9f6ff/)
+  assert.match(display, /\.calendar-event\.status-completed\{background:#e9f6ff/)
+  assert.match(workspace, /\.timeline-item\.status-active\{background:#e9f6ef;border-color:#8ed0b0;color:#28775a}/)
+  assert.match(display, /\.timeline-item\.status-active\{background:#e9f6ef;border-color:#8ed0b0;color:#28775a}/)
+  assert.match(workspace, /\.timeline-group::before\{[^}]*border:4px solid #4f8fda/)
+  assert.match(display, /\.timeline-group::before\{[^}]*border:4px solid #4f8fda/)
+  assert.match(workspace, /\.timeline-group\.timeline-warning::before\{border-color:#d9535f}/)
+  assert.match(display, /\.timeline-group\.is-overdue::before\{border-color:#d9535f}/)
+  assert.match(workspace, /\.timeline-project\{[^}]*background:var\(--project-soft,#f2f4f7\)/)
+  assert.match(display, /\.item-project\{[^}]*background:var\(--project-soft,#f2f4f7\)/)
+  assert.match(workspace, /'timeline-warning': group\.items\.some\(item => timelineStatusLabel\(item\) === '逾期'\)/)
+  assert.match(display, /'is-overdue': group\.items\.some\(item => timelineStatusLabel\(item\) === '逾期'\)/)
+  assert.doesNotMatch(display, /'is-overdue': group\.date < currentDate/)
+  assert.match(display, /\.timeline-group\{position:relative;margin-bottom:12px;opacity:1\}/)
+})
+
 test('负责人展示优先采用后端结构化分工而不是旧的整句文本', () => {
   const project = {
     owner_name: '小柯为A角和主要负责人，小朱为B角',
@@ -26,6 +54,45 @@ test('负责人展示优先采用后端结构化分工而不是旧的整句文�
     { name: '小柯', role: 'A角', primary: true },
     { name: '小朱', role: 'B角', primary: false },
   ])
+})
+
+test('负责人按角色固定顺序展示且同角色保持原顺序', () => {
+  const project = {
+    owner_name: '', owner_roles: {}, owner_assignments: [
+      { name: '杨捷', role: 'B角', primary: false },
+      { name: '朱浩', role: 'A2', primary: false },
+      { name: '张毅', role: 'A1', primary: false },
+      { name: '柯金成', role: 'A角', primary: true },
+      { name: '小朱', role: 'B角', primary: false },
+      { name: '小杨', role: '协助', primary: false },
+    ],
+  }
+  assert.deepEqual(domain.ownerPresentation(project, []).map(item => item.name),
+    ['柯金成', '张毅', '朱浩', '杨捷', '小朱', '小杨'])
+})
+
+test('角色显示不保留裸A/B且A系蓝色B系紫色', () => {
+  assert.equal(domain.ownerRoleLabel('A'), 'A角')
+  assert.equal(domain.ownerRoleLabel('B'), 'B角')
+  assert.equal(domain.ownerRoleLabel('a2'), 'A2')
+  assert.equal(domain.ownerRoleTone('A角'), 'primary')
+  assert.equal(domain.ownerRoleTone('A1'), 'primary')
+  assert.equal(domain.ownerRoleTone('A2'), 'primary')
+  assert.equal(domain.ownerRoleTone('B角'), 'secondary')
+  assert.equal(domain.ownerRoleTone('B1'), 'secondary')
+  assert.equal(domain.ownerRoleTone('B2'), 'secondary')
+})
+
+test('工作台和大屏时间轴在公司卡片下显示结构化负责人', () => {
+  const workspace = readFileSync(new URL('../src/views/ProjectsPage.vue', import.meta.url), 'utf8')
+  const display = readFileSync(new URL('../src/views/DisplayBoard.vue', import.meta.url), 'utf8')
+  for (const page of [workspace, display]) {
+    assert.match(page, /class="timeline-project-block"/)
+    assert.match(page, /class="timeline-owners"/)
+    assert.match(page, /v-for="person in item\.owners"/)
+    assert.match(page, /ownerRoleTone\(person\.role\)/)
+    assert.match(page, /ownerRoleLabel\(person\.role, person\.primary\)/)
+  }
 })
 
 test('项目情绪概览按状态和风险计数并给出鼓励文案', () => {
@@ -67,7 +134,7 @@ test('顶部进行中概览与日历进行中使用同一组天蓝状态色', ()
 })
 
 test('工作台时间轴将十天内节点突出、十天外节点弱化、过期节点标为预警', () => {
-  assert.equal(domain.timelineEmphasis('2026-09-06', '2026-09-07'), 'warning')
+  assert.equal(domain.timelineEmphasis('2026-09-06', '2026-09-07'), 'near')
   assert.equal(domain.timelineEmphasis('2026-09-07', '2026-09-07'), 'near')
   assert.equal(domain.timelineEmphasis('2026-09-17', '2026-09-07'), 'near')
   assert.equal(domain.timelineEmphasis('2026-09-18', '2026-09-07'), 'far')
@@ -194,6 +261,18 @@ test('本周视图按周一至周日同时限制日历和时间轴范围', () =>
   assert.equal(result.endDate, '2026-09-13')
   assert.equal(result.calendarDays.length, 7)
   assert.deepEqual(result.groups.map(group => group.date), ['2026-09-07', '2026-09-13'])
+})
+
+test('本周时间轴显示范围内的已完成事项但排除范围外事项', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
+    { id: 'done', name: '已完成事项', status: 'completed', due_date: '2026-09-08' },
+    { id: 'active', name: '进行中事项', status: 'active', due_date: '2026-09-09', flags: ['overdue'] },
+    { id: 'next', name: '下周已完成事项', status: 'completed', due_date: '2026-09-14' },
+  ] }], '2026-09-09', 'week')
+  assert.deepEqual(result.groups.map(group => [group.date, group.items.map(item => item.target)]), [
+    ['2026-09-08', ['已完成事项']], ['2026-09-09', ['进行中事项']],
+  ])
+  assert.deepEqual(result.groups[1].items[0].flags, ['overdue'])
 })
 
 test('本月视图展示当月全部日期并同时限制时间轴范围', () => {

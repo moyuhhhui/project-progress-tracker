@@ -1,5 +1,6 @@
 """智能机器人群消息适配；解析后直接保存并展示。"""
 import hashlib
+import ipaddress
 import re
 import secrets
 from datetime import timedelta
@@ -14,7 +15,15 @@ from .store import encode
 def validate_web_url(value):
     try:
         url = urlsplit(value)
+        hostname = (url.hostname or '').rstrip('.').lower()
+        is_loopback = hostname == 'localhost'
+        if not is_loopback:
+            try:
+                is_loopback = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                pass
         valid = (url.scheme in ('http', 'https') and url.hostname and url.port != 0
+                 and not is_loopback
                  and not url.username and not url.password and not url.query and not url.fragment
                  and url.path in ('', '/') and not any(c.isspace() for c in value)
                  and not any(c in value for c in '[]()<>\\'))

@@ -2,14 +2,14 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 Text = Annotated[str, Field(max_length=2000)]
 ID = Annotated[str, Field(min_length=1, max_length=100)]
 Percent = Annotated[int, Field(strict=True, ge=0, le=100)]
 State = Literal['not_started', 'active', 'paused', 'completed', 'cancelled']
-OwnerRole = Literal['A', 'B', 'A1', 'A2', '主责', '搭档']
+OwnerRole = Literal['A角', 'B角', 'A1', 'A2', '主责', '搭档']
 
 
 class Contract(BaseModel):
@@ -20,6 +20,12 @@ class OwnerAssignment(Contract):
     name: Name
     role: Annotated[str, Field(min_length=1, max_length=30)]
     primary: bool = False
+
+    @field_validator('role')
+    @classmethod
+    def uppercase_role(cls, value):
+        value = value.upper()
+        return {'A': 'A角', 'B': 'B角'}.get(value, value)
 
 
 class MilestoneCreate(Contract):

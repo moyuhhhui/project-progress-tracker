@@ -1,8 +1,10 @@
 import copy
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 
 from pydantic import ValidationError
 
@@ -50,6 +52,45 @@ def validate(model, data):
     for field in result.model_fields_set:
         require(getattr(result, field) is not None, f'{field} 不能设置为空；清空请用明确的清除操作')
     return result
+
+
+def compact_project_name(value):
+    return re.sub(r'[\W_]+', '', value or '').upper()
+
+
+def project_name_match_level(name, text):
+    name, text = compact_project_name(name), compact_project_name(text)
+    if not name or not text:
+        return None
+    if name == text or name in text:
+        return 2
+    core = re.sub(r'^[A-Z]+', '', name)
+    text_core = re.sub(r'^[A-Z]+', '', text)
+    if len(core) >= 4 and (core == text_core or core in text):
+        return 4
+    if (len(core) >= 4 and core[:2] in text and
+            any(core[index:index + 2] in text for index in range(2, len(core) - 1))):
+        return 5
+    for target in {name, core}:
+        if len(target) >= 4 and len(text) >= len(target) and any(
+                SequenceMatcher(None, target, text[index:index + len(target)]).ratio() >= 0.8
+                for index in range(len(text) - len(target) + 1)):
+            return 6
+    return None
+
+
+def matching_projects(projects, text):
+    compact = compact_project_name(text)
+    scored = []
+    for project in projects:
+        code = compact_project_name(project.get('code'))
+        level = 1 if code and code in compact else project_name_match_level(project['name'], text)
+        if level:
+            scored.append((level, project))
+    if not scored:
+        return []
+    best = min(level for level, _ in scored)
+    return [project for level, project in scored if level == best]
 
 
 class Service:
@@ -137,8 +178,13 @@ class Service:
                     created_at=at, updated_at=at, completed_at=None, paused_at=None, resumed_at=None)
             if item['owner_assignments']:
                 require(manager(actor, project), '仅项目管理人可修改负责人', 403)
-                project['owner_assignments'] = item['owner_assignments']
-                project['owner_name'] = owner_summary(item['owner_assignments'])
+                assignments = item['owner_assignments']
+                if current:
+                    assignments = list({entry['name']: entry for entry in
+                                        [*project['owner_assignments'], *assignments]}.values())
+                require(len(assignments) <= 50, '负责人分工最多 50 人')
+                project['owner_assignments'] = assignments
+                project['owner_name'] = owner_summary(assignments)
                 project['owner_id'] = None
             elif item['owner_name']:
                 require(manager(actor, project), '仅项目管理人可修改负责人', 403)
@@ -289,13 +335,13 @@ class Service:
             actor = self.fresh_user(db, user)
             self.replace_previous(db, actor, previous_draft_id)
             if auto_save and action.intent == 'create_project':
-                require(not any(self.store.project(row)['name'] == action.data.get('name')
-                                for row in db.execute('SELECT * FROM projects')),
+                projects = [self.store.project(row) for row in db.execute('SELECT * FROM projects')]
+                require(not matching_projects(projects, action.data.get('name', '')),
                         '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
             if action.intent == 'record_item' and not action.project_id:
                 name = action.data.get('project_name', '').strip()
-                matches = [p for row in db.execute('SELECT * FROM projects')
-                           if (p := self.store.project(row))['name'] == name]
+                matches = matching_projects(
+                    [self.store.project(row) for row in db.execute('SELECT * FROM projects')], name)
                 require(all(allowed(actor, p) for p in matches), '无法安全关联项目，请管理员核对项目归属与成员权限；未创建新项目')
                 require(len(matches) <= 1, '项目名称重复，请补充项目编号')
                 if matches:
@@ -360,8 +406,9 @@ class Service:
                 project.pop(field, None)
             db.execute('UPDATE projects SET version=?, data=? WHERE id=?', (version, encode_project(project), pid))
         else:
-            require(action.intent != 'record_item' or not any(self.store.project(row)['name'] == project['name']
-                            for row in db.execute('SELECT * FROM projects')),
+            require(not matching_projects(
+                        [self.store.project(row) for row in db.execute('SELECT * FROM projects')],
+                        project['name']),
                     '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
             version = 1
             pid = db.execute('INSERT INTO projects(version,data) VALUES(1,?)', (encode_project(project),)).lastrowid

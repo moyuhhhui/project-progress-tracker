@@ -87,6 +87,47 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(BusinessError):
             self.apply(project, 'edit_project', {'owner_roles': {project['owner_id']: 'C'}, 'reason': '无效角色'})
 
+    def test_record_item_merges_owner_assignments_by_name(self):
+        project = self.create_project()
+        project = self.apply(project, 'edit_project', {'owner_assignments': [
+            {'name': '小柯', 'role': 'A角', 'primary': True},
+            {'name': '小朱', 'role': 'B角', 'primary': False},
+        ], 'reason': '明确初始分工'}, user=self.admin)
+
+        project = self.apply(project, 'record_item', {
+            'text': '补充负责人分工',
+            'owner_assignments': [
+                {'name': '小朱', 'role': '协助', 'primary': False},
+                {'name': '小杨', 'role': 'B角', 'primary': False},
+            ],
+        }, user=self.admin)
+
+        self.assertEqual(project['owner_assignments'], [
+            {'name': '小柯', 'role': 'A角', 'primary': True},
+            {'name': '小朱', 'role': '协助', 'primary': False},
+            {'name': '小杨', 'role': 'B角', 'primary': False},
+        ])
+        self.assertEqual(project['owner_name'], '小柯（A角）、小朱（协助）、小杨（B角）')
+
+    def test_owner_assignment_roles_are_normalized_to_uppercase(self):
+        project = self.create_project()
+
+        project = self.apply(project, 'edit_project', {'owner_assignments': [
+            {'name': '张毅', 'role': 'a1', 'primary': False},
+            {'name': '朱浩', 'role': 'b角', 'primary': False},
+        ], 'reason': '明确负责人分工'}, user=self.admin)
+
+        self.assertEqual(project['owner_assignments'], [
+            {'name': '张毅', 'role': 'A1', 'primary': False},
+            {'name': '朱浩', 'role': 'B角', 'primary': False},
+        ])
+
+        project = self.apply(project, 'edit_project', {'owner_assignments': [
+            {'name': '张毅', 'role': 'A', 'primary': True},
+            {'name': '朱浩', 'role': 'B', 'primary': False},
+        ], 'reason': '不使用裸角色'}, user=self.admin)
+        self.assertEqual([item['role'] for item in project['owner_assignments']], ['A角', 'B角'])
+
     def project(self, pid):
         with self.store.connect() as db:
             return self.service.get_project(db, pid, self.admin)
@@ -111,6 +152,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(draft['status'], 'pending')
         self.assertEqual(len(draft['preview']['milestones']), 2)
         self.assertEqual(self.counts(), (0, 0, 0))
+
+    def test_auto_save_rejects_project_alias_duplicate(self):
+        first = self.payload()
+        first['name'] = 'WMS仓储管理系统'
+        self.service.create_draft(
+            self.admin, Action(intent='create_project', data=first), auto_save=True)
+
+        duplicate = self.payload()
+        duplicate['name'] = 'wms 仓储管理系统'
+        with self.assertRaises(BusinessError) as caught:
+            self.service.create_draft(
+                self.admin, Action(intent='create_project', data=duplicate), auto_save=True)
+
+        self.assertIn('名称冲突', caught.exception.message)
+        self.assertEqual(self.counts(), (1, 1, 0))
 
     def test_member_cannot_assign_others_during_creation(self):
         with self.assertRaises(BusinessError) as error:

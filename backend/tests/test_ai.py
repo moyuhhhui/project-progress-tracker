@@ -338,6 +338,153 @@ class AITests(unittest.TestCase):
 
         self.assertTrue(set(names).issubset(candidate_names))
 
+    def test_prompt_matches_project_short_name_and_one_character_typo(self):
+        for name, milestones in (
+            ('锐翰科技工厂AI提效', [{'name': '开展工厂现场调研'}]),
+            ('博思智能体', [{'name': '出具方案与预算'}]),
+        ):
+            draft = self.service.create_draft(self.admin, Action(
+                intent='create_project', data={'name': name, 'milestones': milestones}))
+            self.service.confirm(self.admin, draft['id'])
+
+        prompt = prompt_context(
+            self.service, self.admin,
+            '锐翰工厂 朱浩a2，张毅a1，博斯智能体柯金成a角，朱浩b角')
+        from backend.app.ai import SYSTEM
+        candidates = json.loads(prompt[len(SYSTEM):])['projects']
+
+        self.assertTrue({'锐翰科技工厂AI提效', '博思智能体'} <=
+                        {project['name'] for project in candidates})
+
+    def test_prompt_matches_warehouse_project_name_variants(self):
+        for name, milestones in (
+            ('WMS仓储管理系统', [{'name': '完成库存盘点'}]),
+            ('仓库机器人', [{'name': '仓储管理系统调研'}]),
+        ):
+            draft = self.service.create_draft(self.admin, Action(
+                intent='create_project', data={'name': name, 'milestones': milestones}))
+            self.service.confirm(self.admin, draft['id'])
+
+        from backend.app.ai import SYSTEM
+        for index, text in enumerate(('仓储管理系统', 'WSM仓储管理系统', 'wms 仓储管理系统')):
+            with self.subTest(text=text):
+                prompt = prompt_context(self.service, self.admin, text)
+                candidates = json.loads(prompt[len(SYSTEM):])['projects']
+                self.assertIn('WMS仓储管理系统',
+                              {project['name'] for project in candidates})
+
+    def test_model_create_for_unique_alias_updates_existing_project(self):
+        draft = self.service.create_draft(self.admin, Action(intent='create_project', data={
+            'name': 'WMS仓储管理系统',
+            'owner_assignments': [{'name': '小柯', 'role': 'B角'}],
+            'milestones': [{'name': '完成库存盘点'}],
+        }))
+        project_id = self.service.confirm(self.admin, draft['id'])['project_id']
+        before = next(project for project in self.service.projects(self.admin)
+                      if project['id'] == project_id)
+        request = MessageInput(text='仓储管理系统a角张毅b角柯金成',
+                               client_message_id='warehouse-alias-update')
+        calls = [{'name': 'create_project', 'arguments': {'data': {
+            'name': '仓储管理系统',
+            'owner_assignments': [
+                {'name': '张毅', 'role': 'A角', 'primary': True},
+                {'name': '柯金成', 'role': 'B角', 'primary': False},
+            ],
+        }}}]
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        projects = self.service.projects(self.admin)
+        updated = next(project for project in projects if project['id'] == project_id)
+        self.assertEqual(result['draft']['action']['intent'], 'edit_project')
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(updated['owner_assignments'], [
+            {'name': '张毅', 'role': 'A角', 'primary': True},
+            {'name': '柯金成', 'role': 'B角', 'primary': False},
+        ])
+        self.assertEqual(updated['milestones'], before['milestones'])
+
+    def test_ambiguous_project_alias_stops_before_saving(self):
+        for name in ('WMS仓储管理系统', 'ERP仓储管理系统'):
+            draft = self.service.create_draft(
+                self.admin, Action(intent='create_project', data={'name': name}))
+            self.service.confirm(self.admin, draft['id'])
+        before = {project['id']: project['version']
+                  for project in self.service.projects(self.admin)}
+        request = MessageInput(text='仓储管理系统a角张毅',
+                               client_message_id='ambiguous-warehouse-alias')
+        calls = [{'name': 'create_project', 'arguments': {'data': {
+            'name': '仓储管理系统',
+            'owner_assignments': [{'name': '张毅', 'role': 'A角', 'primary': True}],
+        }}}]
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        self.assertEqual((result['succeeded'], result['failed']), (0, 1))
+        self.assertIn('多个项目', result['failures'][0]['message'])
+        self.assertEqual(before, {project['id']: project['version']
+                                  for project in self.service.projects(self.admin)})
+
+    def test_explicit_create_rejects_existing_project_alias(self):
+        draft = self.service.create_draft(
+            self.admin, Action(intent='create_project', data={'name': 'WMS仓储管理系统'}))
+        self.service.confirm(self.admin, draft['id'])
+        before = len(self.service.projects(self.admin))
+        request = MessageInput(text='新建项目仓储管理系统',
+                               client_message_id='explicit-duplicate-alias')
+        calls = [{'name': 'create_project', 'arguments': {
+            'data': {'name': '仓储管理系统'}}}]
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        self.assertEqual((result['succeeded'], result['failed']), (0, 1))
+        self.assertIn('名称冲突', result['failures'][0]['message'])
+        self.assertEqual(len(self.service.projects(self.admin)), before)
+
+    def test_model_create_with_unmatched_name_still_creates_project(self):
+        request = MessageInput(text='新建项目供应链驾驶舱',
+                               client_message_id='unmatched-project-create')
+        calls = [{'name': 'create_project', 'arguments': {
+            'data': {'name': '供应链驾驶舱'}}}]
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        self.assertEqual(result['draft']['status'], 'confirmed')
+        self.assertIn('供应链驾驶舱',
+                      {project['name'] for project in self.service.projects(self.admin)})
+
+    def test_multiple_project_owner_message_rejects_single_project_action(self):
+        projects = []
+        for name in ('锐翰科技工厂AI提效', '博思智能体'):
+            draft = self.service.create_draft(self.admin, Action(
+                intent='create_project', data={'name': name}))
+            project_id = self.service.confirm(self.admin, draft['id'])['project_id']
+            projects.append(self.service.projects(self.admin)[-1])
+        before = {project['id']: project['version'] for project in self.service.projects(self.admin)}
+        request = MessageInput(
+            text='锐翰工厂 朱浩a2，张毅a1，博斯智能体柯金成a角，朱浩b角',
+            client_message_id='mixed-project-owners')
+        calls = [{'name': 'edit_project', 'arguments': {
+            'project_id': projects[0]['id'],
+            'data': {'owner_assignments': [
+                {'name': '朱浩', 'role': 'a2'},
+                {'name': '张毅', 'role': 'a1'},
+                {'name': '柯金成', 'role': 'a角'},
+            ], 'reason': '更新负责人分工'},
+        }}]
+
+        with self.assertRaises(BusinessError) as caught:
+            asyncio.run(parse_message(
+                self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        self.assertIn('多个项目', caught.exception.message)
+        self.assertEqual(before, {project['id']: project['version']
+                                  for project in self.service.projects(self.admin)})
+
     def test_disable_account_during_model_query_denies_response(self):
         request = MessageInput(text='查询', client_message_id='disable-001')
         def parser(_):

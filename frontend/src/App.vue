@@ -31,7 +31,7 @@ onBeforeUnmount(() => {
   <main v-if="!actor" class="connection-page">
     <h1>公司项目进度追踪</h1>
     <p v-if="loading">正在连接工作台…</p>
-    <template v-else><p role="alert">{{ error }}</p><el-button type="primary" @click="connect">重新连接</el-button></template>
+    <p role="alert">{{ error }}</p><el-button type="primary" @click="connect">重新连接</el-button>
   </main>
   <DisplayBoard v-else-if="displayMode" :actor="actor" />
   <Workspace v-else :actor="actor" />
