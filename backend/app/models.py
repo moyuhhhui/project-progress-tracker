@@ -33,7 +33,7 @@ class MilestoneCreate(Contract):
     criterion: Text = ''
     owner_id: ID | None = None
     start_date: date | None = None
-    due_date: date | None = None
+    due_date: date
     update_interval: Annotated[int, Field(strict=True, ge=1, le=30)] = 2
 
     @model_validator(mode='after')
@@ -56,12 +56,14 @@ class ProjectCreate(Contract):
     owner_roles: dict[ID, OwnerRole] = Field(default_factory=dict)
     owner_assignments: Annotated[list[OwnerAssignment], Field(max_length=50)] = Field(default_factory=list)
     start_date: date | None = None
-    due_date: date | None = None
+    due_date: date
     display_visible: bool = True
     milestones: Annotated[list[MilestoneCreate], Field(max_length=50)] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def dates(self):
+        if not (self.owner_id or self.owner_name or self.owner_assignments or self.owner_roles):
+            raise ValueError('项目负责人不能为空')
         if self.due_date and self.start_date and self.due_date < self.start_date:
             raise ValueError('截止日期不能早于开始日期')
         for node in self.milestones:
