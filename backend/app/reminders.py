@@ -161,6 +161,43 @@ def scan(store, now=None):
     return generated
 
 
+def scan_meetings(store, now=None):
+    now = now or now_local()
+    generated = 0
+    with store.connect(write=True) as db:
+        day = now.date().isoformat()
+        for row in db.execute("SELECT * FROM meetings WHERE status='active'").fetchall():
+            start = datetime.fromisoformat(row['start_at'])
+            if start - timedelta(minutes=30) > now or start <= now:
+                continue
+            key = f"meeting:{row['id']}:{day}"
+            db.execute("INSERT INTO meeting_reminders(id,meeting_id,local_day,status,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+                       (key, row['id'], day, 'queued' if group_webhook_configured() else 'blocked', now.isoformat()))
+            generated += 1
+    return generated
+
+
+def dispatch_meetings(store, sender=None, now=None):
+    if not group_webhook_configured():
+        return 0
+    sender, now = sender or WeComGroupWebhookSender(), now or now_local()
+    with store.connect() as db:
+        rows = db.execute("SELECT r.*,m.title,m.start_at,m.location,m.notes FROM meeting_reminders r JOIN meetings m ON m.id=r.meeting_id WHERE r.status='queued' AND r.attempts<3 AND r.next_attempt IS NULL ORDER BY m.start_at").fetchall()
+    sent = 0
+    for row in rows:
+        with store.connect(write=True) as db:
+            db.execute("UPDATE meeting_reminders SET status='sending',attempts=attempts+1,updated_at=? WHERE id=?", (now.isoformat(), row['id']))
+        start = datetime.fromisoformat(row['start_at']).astimezone(TZ)
+        content = f"【会议提醒】\n{row['title']}\n开始时间：{start.strftime('%Y-%m-%d %H:%M')}"
+        if row['location']: content += f"\n地点：{row['location']}"
+        if row['notes']: content += f"\n备注：{row['notes']}"
+        status, detail = sender.send(content)
+        with store.connect(write=True) as db:
+            db.execute("UPDATE meeting_reminders SET status=?,detail=?,updated_at=?,next_attempt=? WHERE id=?", (status, detail, now.isoformat(), (now+timedelta(minutes=10)).isoformat(), row['id']))
+        sent += status == 'accepted'
+    return sent
+
+
 class WeComSender:
     @property
     def configured(self):
@@ -361,7 +398,9 @@ def run_cycle(store, sender=None, now=None):
         return {'skipped': True}
     try:
         auto_completed = auto_complete_due(store, now)
-        return {'auto_completed': auto_completed, 'queued': scan(store, now), 'accepted': dispatch(store, sender, now)}
+        queued = scan(store, now) + scan_meetings(store, now)
+        accepted = dispatch(store, sender, now) + dispatch_meetings(store, sender, now)
+        return {'auto_completed': auto_completed, 'queued': queued, 'accepted': accepted}
     finally:
         with store.connect(write=True) as db:
             db.execute('DELETE FROM worker_lease WHERE id=1 AND owner=?', (owner,))

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import ai
 from .models import Action, MessageInput, UserCreate, UserPatch, ReminderSettings
-from .reminders import scan
+from .reminders import scan, scan_meetings
 from .service import BusinessError, Service, require, manager, all_access
 from .store import Store, encode, token_hash
 from .wecom import read_status
@@ -80,6 +80,10 @@ def create_app(db_path=None):
     @app.get('/api/projects')
     def projects(actor=Depends(editor)):
         return {'projects':service.projects(actor), 'at':service.clock().isoformat()}
+
+    @app.get('/api/meetings')
+    def meetings(actor=Depends(editor)):
+        return {'meetings': service.meetings(actor), 'at': service.clock().isoformat()}
 
     @app.get('/api/display')
     def display(actor=Depends(user)):
@@ -207,7 +211,7 @@ def create_app(db_path=None):
 
     @app.post('/api/reminders/scan')
     def scan_reminders(actor=Depends(admin)):
-        return {'count':scan(store),'message':'已检查并更新提醒队列；此操作不发送外部消息'}
+        return {'count': scan(store) + scan_meetings(store), 'message':'已检查并更新提醒队列；此操作不发送外部消息'}
 
     @app.post('/api/reminders/{reminder_id}/resolve')
     def resolve_reminder(reminder_id: str, actor=Depends(admin)):

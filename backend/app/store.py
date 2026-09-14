@@ -120,6 +120,19 @@ class Store:
               id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL,
               phase TEXT NOT NULL, expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS meetings (
+              id TEXT PRIMARY KEY, created_by TEXT NOT NULL, project_id INTEGER,
+              start_at TEXT NOT NULL, title TEXT NOT NULL, attendee_ids TEXT NOT NULL DEFAULT '[]',
+              location TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              FOREIGN KEY(created_by) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS meeting_reminders (
+              id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, local_day TEXT NOT NULL,
+              status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+              next_attempt TEXT, detail TEXT NOT NULL DEFAULT '',
+              FOREIGN KEY(meeting_id) REFERENCES meetings(id)
+            );
             ''')
             # 一次性绑定码已停用；企业微信身份由共享模式或成员管理配置。
             db.execute('DROP TABLE IF EXISTS wecom_pairings')

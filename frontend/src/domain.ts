@@ -6,7 +6,7 @@ export const flagLabels: Record<Flag, string> = { overdue: '计划逾期', stale
 export const intentLabels: Record<Intent, string> = {
   record_item: '记录项目事项',
   create_project: '创建项目', edit_project: '调整项目信息', add_milestone: '新增项目事项', edit_milestone: '调整项目事项',
-  report_progress: '汇报进度', project_status: '变更项目状态', milestone_status: '变更目标状态', query: '查询项目', ignore: '无操作',
+  report_progress: '汇报进度', project_status: '变更项目状态', milestone_status: '变更目标状态', create_meeting: '会议', query: '查询项目', ignore: '无操作',
 }
 export const fieldLabels: Record<string, string> = {
   owner_name: '负责人姓名',

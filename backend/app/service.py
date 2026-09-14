@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 from pydantic import ValidationError
 
 from .models import (Action, ProjectCreate, ProjectPatch, MilestoneCreate, MilestonePatch,
-                     ProgressReport, StatusChange, RecordItem)
+                     ProgressReport, StatusChange, RecordItem, MeetingCreate)
 from .store import Store, encode, encode_project, owner_summary
 
 TZ = timezone(timedelta(hours=8))
@@ -454,3 +454,42 @@ class Service:
             return [{**{k:v for k,v in p.items() if k in project_fields},
                      'milestones': [{k:v for k,v in n.items() if k in node_fields} for n in p['milestones']]} for p in projects]
         return projects
+
+    def create_meeting(self, user, data):
+        meeting = validate(MeetingCreate, data)
+        at = self.clock().isoformat()
+        meeting_id = 'M' + secrets.token_hex(10)
+        with self.store.connect(write=True) as db:
+            actor = self.fresh_user(db, user)
+            project_id = meeting.project_id
+            if project_id:
+                project = self.get_project(db, project_id, actor)
+                require(allowed(actor, project), '无权关联该项目', 403)
+                project_id = int(project['id'])
+            for uid in meeting.attendee_ids:
+                member = self.store.user(db, uid)
+                require(member and member['active'] and member['role'] != 'display', '参会人不存在或不可用')
+            db.execute('INSERT INTO meetings(id,created_by,project_id,start_at,title,attendee_ids,location,notes,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                       (meeting_id, actor['id'], project_id, meeting.start_at.isoformat(), meeting.title or '未命名会议',
+                        encode(meeting.attendee_ids), meeting.location or '', meeting.notes or '', 'active', at, at))
+        return self.meeting(user, meeting_id)
+
+    def meeting(self, user, meeting_id):
+        with self.store.connect() as db:
+            actor = self.fresh_user(db, user)
+            row = db.execute('SELECT * FROM meetings WHERE id=?', (meeting_id,)).fetchone()
+            require(row is not None, '会议不存在', 404)
+            require(all_access(actor) or row['created_by'] == actor['id'] or actor['id'] in json.loads(row['attendee_ids']), '无权查看该会议', 403)
+            result = dict(row)
+            result['attendee_ids'] = json.loads(result['attendee_ids'])
+            return result
+
+    def meetings(self, user):
+        with self.store.connect() as db:
+            actor = self.fresh_user(db, user)
+            rows = [dict(r) for r in db.execute(
+                'SELECT * FROM meetings WHERE status=? AND (created_by=? OR attendee_ids LIKE ? OR ?)',
+                ('active', actor['id'], f'%"{actor["id"]}"%', all_access(actor))).fetchall()]
+            for row in rows:
+                row['attendee_ids'] = json.loads(row['attendee_ids'])
+            return rows

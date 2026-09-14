@@ -4,7 +4,7 @@ import json
 from pydantic import ValidationError
 
 from .models import (Action, MilestoneCreate, MilestonePatch, ProgressReport,
-                     ProjectCreate, ProjectPatch, RecordItem, StatusChange)
+                     ProjectCreate, ProjectPatch, RecordItem, StatusChange, MeetingCreate)
 from .service import BusinessError, require
 
 MAX_TOOL_ROUNDS = 8
@@ -18,6 +18,7 @@ TOOL_INTENTS = {
     'report_progress': ('report_progress', ProgressReport, '汇报已有目标节点的进度'),
     'change_project_status': ('project_status', StatusChange, '修改已有项目状态'),
     'change_milestone_status': ('milestone_status', StatusChange, '修改已有目标节点状态'),
+    'create_meeting': ('create_meeting', MeetingCreate, '记录会议；仅开始时间必填，项目、标题、参会人、地点和备注均可选'),
 }
 
 

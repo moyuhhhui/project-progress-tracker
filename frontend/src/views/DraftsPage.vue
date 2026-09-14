@@ -22,7 +22,8 @@ async function parse() {
       emit('draft', result.draft)
       previous.value = result.draft.status === 'needs_input' ? result.draft : null
       response.value = result.draft.status === 'needs_input' ? '仍需补充以下信息，尚未保存项目。' : result.draft.status === 'confirmed' ? '信息齐全，已自动保存。' : '草稿待处理，请补充说明后重新提交。'
-    } else if (result.kind === 'query') { queryProjects.value = result.projects; response.value = '查询完成，未修改任何项目。'; previous.value = null }
+    } else if (result.kind === 'meeting') { response.value = `会议已保存：${result.meeting.title}，开始时间 ${dateTime(result.meeting.start_at)}；将在开始前 30 分钟提醒。`; previous.value = null }
+    else if (result.kind === 'query') { queryProjects.value = result.projects; response.value = '查询完成，未修改任何项目。'; previous.value = null }
     else { response.value = result.message; previous.value = null }
     text.value = ''; emit('refresh')
   } catch (e) { error.value = errorText(e) }

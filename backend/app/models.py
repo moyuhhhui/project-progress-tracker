@@ -1,5 +1,5 @@
 """固定业务契约；未知字段拒绝，更新仅采用显式提供的字段。"""
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -150,8 +150,17 @@ class RecordItem(RecordedTask):
         return self
 
 
+class MeetingCreate(Contract):
+    start_at: datetime
+    title: Name | None = None
+    project_id: ID | None = None
+    attendee_ids: Annotated[list[ID], Field(max_length=200)] = []
+    location: Annotated[str, Field(max_length=200)] | None = None
+    notes: Text | None = None
+
+
 Intent = Literal['record_item', 'create_project', 'edit_project', 'add_milestone', 'edit_milestone',
-                 'report_progress', 'project_status', 'milestone_status', 'query', 'ignore']
+                 'report_progress', 'project_status', 'milestone_status', 'create_meeting', 'query', 'ignore']
 
 
 class Action(Contract):

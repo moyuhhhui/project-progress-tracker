@@ -21,7 +21,7 @@ export interface Project {
   progress?: number | null; flags?: Flag[]; risk_score?: number; updated_at: string; milestones: Milestone[]
 }
 export type Intent = 'record_item' | 'create_project' | 'edit_project' | 'add_milestone' | 'edit_milestone' |
-  'report_progress' | 'project_status' | 'milestone_status' | 'query' | 'ignore'
+  'report_progress' | 'project_status' | 'milestone_status' | 'create_meeting' | 'query' | 'ignore'
 export interface Action { intent: Intent; project_id?: string; milestone_id?: string; data: Record<string, unknown> }
 export interface Draft {
   id: string; status: 'pending' | 'needs_input' | 'confirmed' | 'cancelled' | 'expired'
@@ -44,5 +44,6 @@ export interface Reminder {
   status: string; attempts: number; updated_at: string; detail: string
 }
 export interface Settings { start_hour: number; end_hour: number; due_hour: number; workday_overrides: Record<string, boolean> }
-export type MessageResult = { kind: 'draft'; draft: Draft } | { kind: 'query'; projects: Project[] } |
+export interface Meeting { id: string; start_at: string; title: string; project_id?: number | null; attendee_ids: string[]; location: string; notes: string; status: string }
+export type MessageResult = { kind: 'draft'; draft: Draft } | { kind: 'meeting'; meeting: Meeting } | { kind: 'query'; projects: Project[] } |
   { kind: 'ignored'; message: string }

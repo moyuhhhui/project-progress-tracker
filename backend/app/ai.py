@@ -10,7 +10,7 @@ from datetime import timedelta
 from pydantic import ValidationError
 
 from .models import (Action, ParsedMessage, ProjectCreate, ProjectPatch, MilestoneCreate,
-                     MilestonePatch, ProgressReport, StatusChange, RecordItem)
+                     MilestonePatch, ProgressReport, StatusChange, RecordItem, MeetingCreate)
 from .ai_tools import (MAX_TOOL_ROUNDS, TOOL_INTENTS,
                        action_from_tool_call, business_tool_schemas, data_schema)
 from .service import (BusinessError, require, all_access, matching_projects,
@@ -21,6 +21,7 @@ DATA_MODELS = {
     'record_item': RecordItem, 'create_project': ProjectCreate, 'edit_project': ProjectPatch,
     'add_milestone': MilestoneCreate, 'edit_milestone': MilestonePatch,
     'report_progress': ProgressReport, 'project_status': StatusChange, 'milestone_status': StatusChange,
+    'create_meeting': MeetingCreate,
 }
 
 
@@ -102,7 +103,8 @@ A角本身表示主负责人，不要再生成第二个“主负责人”角色�
 
 # 字段约束
 按提供的 JSON 契约提取：intent、project_id、milestone_id、data、schema_version="1"、missing_fields、ambiguities、evidence。
-允许意图：record_item/create_project/edit_project/add_milestone/edit_milestone/report_progress/project_status/milestone_status/query/ignore。
+允许意图：record_item/create_project/edit_project/add_milestone/edit_milestone/report_progress/project_status/milestone_status/create_meeting/query/ignore。
+会议使用 create_meeting；start_at 为会议开始时间且必填，项目、标题、参会人、地点、备注均为可选。没有项目也可以创建会议。
 create_project 只要求项目名称 name。负责人、开始日期、截止日期和事项均为选填；未提供时不追问、不列入 missing_fields、不编造。
 “进行中”写 status="active"，未说明状态则省略。项目可以没有 milestones，不要为凑字段编造事项。
 对接单位 contact_company、对接人 contact_name、联系方式 contact_info 均为选填文本。对接人不需要匹配成员 ID，也不等同于项目负责人。
@@ -145,6 +147,7 @@ A角本身就是主要负责人：role 只写“A角”，primary=true；B角 pr
 “确认时间”作为相应事项的 time_text；明确到具体日期时同时填写 YYYY-MM-DD 的 due_date。“下周”“尽快”等只保留 time_text。
 新项目未说明状态时默认进行中；只有明确要求“前期准备”时才使用 not_started。
 新安排的“进行中”是事项状态，不代表整个项目状态。
+会议使用 create_meeting：只要明确会议开始时间即可创建，start_at 使用 ISO 8601；project_id 可选，标题、参会人、地点和备注可省略。
 
 # 字段约束
 项目名称、负责人、日期、状态只提取原文明示内容。未提及或不确定的字段省略，禁止使用 null、空字符串或编造内容补齐。
@@ -315,12 +318,18 @@ def save_action_batch(service, user, actions, source, diagnostics=None, *, chann
                                            {**(diagnostics or {}), 'batch_index': index},
                                            previous_draft_id=previous_draft_id)
             else:
+                if action.intent == 'create_meeting':
+                    meeting = service.create_meeting(user, action.data)
+                    drafts.append({'kind': 'meeting', 'meeting': meeting})
+                    continue
                 draft = service.create_draft(
                     user, action, source, {**(diagnostics or {}), 'batch_index': index},
                     previous_draft_id=previous_draft_id, auto_save=True)
             drafts.append(draft)
         except BusinessError as exc:
             failures.append({'project_name': _action_label(action, index), 'message': exc.message})
+    if len(drafts) == 1 and drafts[0].get('kind') == 'meeting' and not failures:
+        return drafts[0]
     if len(drafts) == 1 and not failures:
         return {'kind': 'draft', 'draft': drafts[0]}
     return {'kind': 'batch', 'drafts': drafts, 'failures': failures,
@@ -465,6 +474,11 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
             if channel == 'wecom':
                 draft = save_group_message(service, user, action, source, diagnostics,
                                            previous_draft_id=request.previous_draft_id)
+            elif parsed.intent == 'create_meeting':
+                result = {'kind': 'meeting', 'meeting': service.create_meeting(user, action.data)}
+                with service.store.connect(write=True) as db:
+                    db.execute("UPDATE messages SET status='done',response=? WHERE id=?", (encode(result),message_id))
+                return result
             elif (parsed.missing_fields and action.intent != 'record_item') or parsed.ambiguities:
                 draft = save_incomplete(service,user,action,source,diagnostics,previous_draft_id=request.previous_draft_id)
             else:
