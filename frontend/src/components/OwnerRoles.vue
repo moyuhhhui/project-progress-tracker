@@ -14,5 +14,5 @@ const assignments = computed(() => ownerPresentation(props.project, props.users)
   </span>
 </template>
 <style scoped>
-.owner-roles{display:inline-flex;flex-wrap:wrap;gap:5px 8px;font-size:12px;font-weight:400;line-height:1.6}.owner-role{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:#526176}.owner-role b{display:inline-grid;place-items:center;width:20px;height:20px;font-size:11px;font-weight:700;line-height:1;border-radius:50%}.owner-role b.role-primary{color:#3068da;background:#eef3ff;border:1px solid #b9d0ff}.owner-role b.role-secondary{color:#7a54a6;background:#f3edfa;border:1px solid #d4c5ec}.owner-role b.role-neutral{color:#526176;background:#f2f4f7;border:1px solid #dce1e9}
+.owner-roles{display:inline-flex;flex-wrap:wrap;gap:5px 8px;font-size:12px;font-weight:400;line-height:1.6}.owner-role{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:#526176}.owner-role b{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 4px;font-size:11px;font-weight:700;line-height:1;border-radius:4px}.owner-role b.role-primary{color:#3068da;background:#eef3ff;border:1px solid #b9d0ff}.owner-role b.role-secondary{color:#7a54a6;background:#f3edfa;border:1px solid #d4c5ec}.owner-role b.role-neutral{color:#526176;background:#f2f4f7;border:1px solid #dce1e9}
 </style>
