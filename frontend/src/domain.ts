@@ -95,6 +95,10 @@ export function ownerRoleLabel(role: string, primary = false) {
   if (value === 'B') return 'B角'
   return value || (primary ? 'A角' : '负责人')
 }
+export function ownerRoleMark(role: string, primary = false) {
+  const value = ownerRoleLabel(role, primary)
+  return value === 'A角' ? 'A' : value === 'B角' ? 'B' : value
+}
 export function ownerRoleTone(role: string) {
   const value = ownerRoleLabel(role)
   if (/^A(?:角|1|2)$/.test(value)) return 'primary'
