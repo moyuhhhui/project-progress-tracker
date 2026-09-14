@@ -213,6 +213,9 @@ class Service:
                         all(n['owner_id'] == actor['id'] for n in data['milestones']),
                         '首次立项不能直接给其他员工分派任务；创建后由项目负责人管理成员', 403)
             nodes = [self.new_node(n) for n in data.pop('milestones')]
+            if self.internal_shared:
+                for node in nodes:
+                    node['owner_id'] = None
             project = {**data, 'milestones': nodes,
                        'original_due_date': data['due_date'], 'created_by': actor['id'],
                        'created_at': at, 'updated_at': at, 'completed_at': None,
