@@ -388,6 +388,12 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
         query_requested = False
         query_all_requested = False
         query_project_ids = set()
+        query_text = request.text.casefold()
+        mentioned_query_project_ids = {
+            project['id'] for project in candidates
+            if project['code'].casefold() in query_text or
+            _project_name_in_text(project['name'], request.text)
+        }
         if parser is None:
             def accept(name, arguments):
                 nonlocal query_all_requested, query_requested
@@ -401,6 +407,10 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
                         require(project is not None, '模型引用了不可用的项目')
                         query_project_ids.add(project['id'])
                         return {'projects': [project]}
+                    if mentioned_query_project_ids:
+                        query_project_ids.update(mentioned_query_project_ids)
+                        return {'projects': [project for project in candidates
+                                             if project['id'] in mentioned_query_project_ids]}
                     query_all_requested = True
                     return {'projects': candidates}
                 try:
@@ -483,6 +493,12 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
                 with service.store.connect() as db:
                     p = service.get_project(db,parsed.project_id,user)
                 projects = [p2 for p2 in projects if p2['id'] == p['id']]
+            else:
+                mentioned = [project for project in projects
+                             if project['code'].casefold() in request.text.casefold() or
+                             _project_name_in_text(project['name'], request.text)]
+                if mentioned:
+                    projects = mentioned
             result = {'kind':'query','projects':projects}
         else:
             if channel == 'wecom':
