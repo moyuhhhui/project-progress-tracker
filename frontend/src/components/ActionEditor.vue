@@ -80,7 +80,6 @@ async function preview() {
       if (report.historical) requireText(report.event_date, '历史发生日期')
       data = reportData(report)
     }
-    if (['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(props.intent)) requireText(reason.value, '变更原因')
     const action: Action = { intent: props.intent, data,
       ...(props.project ? { project_id: props.project.id } : {}), ...(props.node ? { milestone_id: props.node.id } : {}) }
     busy.value = true
@@ -127,7 +126,7 @@ async function preview() {
         <el-alert v-if="state === 'completed'" :title="node ? `请核对完成标准：${node.criterion}` : '项目完成需要所有未取消的目标均已完成。'" type="warning" :closable="false" class="section-gap" />
         <el-alert v-if="state === 'paused'" title="暂停不会自动顺延计划截止日期。" type="info" :closable="false" class="section-gap" />
       </template>
-      <el-form-item v-if="['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(intent)" :label="isStatus && state === 'paused' ? '暂停原因' : '变更原因'" required><el-input v-model="reason" type="textarea" :rows="2" maxlength="1000" placeholder="说明调整或确认的依据" /></el-form-item>
+      <el-form-item v-if="['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(intent)" :label="isStatus && state === 'paused' ? '暂停原因（选填）' : '变更原因（选填）'"><el-input v-model="reason" type="textarea" :rows="2" maxlength="1000" placeholder="可填写调整或确认的依据" /></el-form-item>
       <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     </el-form>
     <template #footer><el-button :disabled="busy" @click="$emit('close')">返回</el-button><el-button type="primary" :loading="busy" @click="preview">保存</el-button></template>

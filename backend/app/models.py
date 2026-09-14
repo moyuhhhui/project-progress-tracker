@@ -84,7 +84,7 @@ class ProjectPatch(Contract):
     start_date: date | None = None
     due_date: date | None = None
     display_visible: bool | None = None
-    reason: Annotated[str, Field(min_length=1, max_length=1000)]
+    reason: Annotated[str, Field(max_length=1000)] = ''
 
 
 class MilestonePatch(Contract):
@@ -94,7 +94,7 @@ class MilestonePatch(Contract):
     start_date: date | None = None
     due_date: date | None = None
     update_interval: Annotated[int, Field(strict=True, ge=1, le=30)] | None = None
-    reason: Annotated[str, Field(min_length=1, max_length=1000)]
+    reason: Annotated[str, Field(max_length=1000)] = ''
 
 
 class ProgressReport(Contract):
@@ -119,7 +119,7 @@ class ProgressReport(Contract):
 
 class StatusChange(Contract):
     status: State
-    reason: Annotated[str, Field(min_length=1, max_length=1000)]
+    reason: Annotated[str, Field(max_length=1000)] = ''
 
 
 class RecordedTask(Contract):

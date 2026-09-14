@@ -168,6 +168,9 @@ def scan_meetings(store, now=None):
         day = now.date().isoformat()
         for row in db.execute("SELECT * FROM meetings WHERE status='active'").fetchall():
             start = datetime.fromisoformat(row['start_at'])
+            if start + timedelta(hours=1) <= now:
+                db.execute("UPDATE meetings SET status='completed',updated_at=? WHERE id=?", (now.isoformat(), row['id']))
+                continue
             if start - timedelta(minutes=30) > now or start <= now:
                 continue
             key = f"meeting:{row['id']}:{day}"
