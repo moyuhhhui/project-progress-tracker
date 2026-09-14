@@ -87,8 +87,8 @@ def create_app(db_path=None):
 
     @app.get('/api/display')
     def display(actor=Depends(user)):
-        require(all_access(actor) or actor['role'] == 'display', '需要独立大屏账号',403)
-        return {'projects':service.projects(actor,display=True), 'meetings': service.meetings(actor), 'at':service.clock().isoformat()}
+        # 大屏与工作台共用同一份数据快照，不再单独按管理员/普通账号切换口径。
+        return {'projects':service.projects(actor), 'meetings': service.meetings(actor), 'at':service.clock().isoformat()}
 
     @app.post('/api/drafts')
     def draft(action: Action, actor=Depends(editor)):
