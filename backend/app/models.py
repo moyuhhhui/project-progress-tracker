@@ -32,6 +32,7 @@ class MilestoneCreate(Contract):
     name: Name
     criterion: Text = ''
     owner_id: ID | None = None
+    owner_name: Name | None = None
     start_date: date | None = None
     due_date: date
     update_interval: Annotated[int, Field(strict=True, ge=1, le=30)] = 2

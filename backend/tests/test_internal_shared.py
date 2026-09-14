@@ -56,6 +56,27 @@ class InternalSharedTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM users WHERE name='朱浩'").fetchone()[0], 0)
 
+    def test_project_preserves_named_milestone_owners(self):
+        response = self.client.post('/api/drafts', json={'intent': 'create_project', 'data': {
+            'name': '华东仓储系统升级',
+            'owner_assignments': [
+                {'name': '柯金成', 'role': 'A角', 'primary': True},
+                {'name': '朱浩', 'role': 'B角', 'primary': False},
+            ],
+            'start_date': '2026-09-16', 'due_date': '2026-10-30',
+            'milestones': [
+                {'name': '完成现状调研', 'criterion': '输出仓储流程调研报告并由周经理确认',
+                 'owner_id': '柯金成', 'start_date': '2026-09-16', 'due_date': '2026-09-20'},
+                {'name': '完成系统方案设计', 'criterion': '提交系统功能和数据方案',
+                 'owner_id': '朱浩', 'start_date': '2026-09-21', 'due_date': '2026-09-30'},
+            ],
+        }})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        project = self.client.get('/api/projects').json()['projects'][0]
+        self.assertEqual([node['owner_name'] for node in project['milestones']], ['柯金成', '朱浩'])
+        self.assertEqual([node['owner_id'] for node in project['milestones']], [None, None])
+
     def test_delivery_completes_project_without_any_items(self):
         response = self.client.post('/api/drafts', json={'intent': 'create_project',
             'data': {'name': '无事项项目', 'status': 'active'}})

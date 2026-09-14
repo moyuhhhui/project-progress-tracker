@@ -457,6 +457,37 @@ class AITests(unittest.TestCase):
         self.assertIn('供应链驾驶舱',
                       {project['name'] for project in self.service.projects(self.admin)})
 
+    def test_shared_group_creates_distinct_warehouse_project_with_named_node_owners(self):
+        existing = self.service.create_draft(self.admin, Action(intent='create_project', data={
+            'name': 'WMS仓储管理系统', 'owner_name': '张毅', 'due_date': '2026-09-30',
+        }))
+        self.service.confirm(self.admin, existing['id'])
+        self.service.internal_shared = True
+        request = MessageInput(text='新建项目：华东仓储系统升级',
+                               client_message_id='shared-warehouse-create')
+        calls = [{'name': 'create_project', 'arguments': {'data': {
+            'name': '华东仓储系统升级',
+            'owner_assignments': [
+                {'name': '柯金成', 'role': 'A角', 'primary': True},
+                {'name': '朱浩', 'role': 'B角', 'primary': False},
+            ],
+            'start_date': '2026-09-16', 'due_date': '2026-10-30',
+            'milestones': [
+                {'name': '完成现状调研', 'criterion': '输出调研报告', 'owner_id': '柯金成',
+                 'start_date': '2026-09-16', 'due_date': '2026-09-20'},
+                {'name': '完成系统方案设计', 'criterion': '提交系统方案', 'owner_id': '朱浩',
+                 'start_date': '2026-09-21', 'due_date': '2026-09-30'},
+            ],
+        }}}]
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin, request, lambda _: calls, channel='wecom'))
+
+        self.assertEqual(result['draft']['status'], 'confirmed')
+        project = next(project for project in self.service.projects(self.admin)
+                       if project['name'] == '华东仓储系统升级')
+        self.assertEqual([node['owner_name'] for node in project['milestones']], ['柯金成', '朱浩'])
+
     def test_multiple_project_owner_message_rejects_single_project_action(self):
         projects = []
         for name in ('锐翰科技工厂AI提效', '博思智能体'):

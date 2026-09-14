@@ -168,6 +168,20 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('名称冲突', caught.exception.message)
         self.assertEqual(self.counts(), (1, 1, 0))
 
+    def test_auto_save_allows_distinct_project_with_shared_name_fragments(self):
+        first = self.payload()
+        first['name'] = 'WMS仓储管理系统'
+        self.service.create_draft(
+            self.admin, Action(intent='create_project', data=first), auto_save=True)
+
+        distinct = self.payload()
+        distinct['name'] = '华东仓储系统升级'
+        draft = self.service.create_draft(
+            self.admin, Action(intent='create_project', data=distinct), auto_save=True)
+
+        self.assertEqual(draft['status'], 'confirmed')
+        self.assertEqual(self.counts(), (2, 2, 0))
+
     def test_member_cannot_assign_others_during_creation(self):
         with self.assertRaises(BusinessError) as error:
             self.service.create_draft(self.owner, Action(intent='create_project', data=self.payload()))

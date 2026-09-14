@@ -240,7 +240,7 @@ def _resolve_create_actions(service, user, actions, source):
         if action.intent != 'create_project':
             resolved.append(action)
             continue
-        matches = matching_projects(projects, action.data.get('name', ''))
+        matches = matching_projects(projects, action.data.get('name', ''), max_level=4)
         if not matches:
             resolved.append(action)
             continue
@@ -540,9 +540,9 @@ def save_group_message(service, user, action, source, diagnostics, *, previous_d
             action.data['member_ids'] = list(dict.fromkeys(action.data.get('member_ids', []) + list(roles)))
     if action.intent == 'create_project' and service.internal_shared:
         # 共享工作台按姓名记录负责人，不存在可供目标节点引用的账号 ID。
-        # 节点负责人姓名已保留在项目负责人分工中，避免把姓名误当成成员 ID。
         for node in action.data.get('milestones', []):
             if isinstance(node, dict) and node.get('owner_id'):
+                node['owner_name'] = node['owner_id']
                 node['owner_id'] = None
     if action.intent in ('edit_project', 'edit_milestone', 'project_status', 'milestone_status'):
         action.data.setdefault('reason', source[:1000])

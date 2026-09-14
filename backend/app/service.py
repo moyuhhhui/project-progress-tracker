@@ -79,13 +79,13 @@ def project_name_match_level(name, text):
     return None
 
 
-def matching_projects(projects, text):
+def matching_projects(projects, text, *, max_level=None):
     compact = compact_project_name(text)
     scored = []
     for project in projects:
         code = compact_project_name(project.get('code'))
         level = 1 if code and code in compact else project_name_match_level(project['name'], text)
-        if level:
+        if level and (max_level is None or level <= max_level):
             scored.append((level, project))
     if not scored:
         return []
@@ -215,6 +215,7 @@ class Service:
             nodes = [self.new_node(n) for n in data.pop('milestones')]
             if self.internal_shared:
                 for node in nodes:
+                    node['owner_name'] = node.get('owner_name') or node['owner_id']
                     node['owner_id'] = None
             project = {**data, 'milestones': nodes,
                        'original_due_date': data['due_date'], 'created_by': actor['id'],
@@ -339,7 +340,7 @@ class Service:
             self.replace_previous(db, actor, previous_draft_id)
             if auto_save and action.intent == 'create_project':
                 projects = [self.store.project(row) for row in db.execute('SELECT * FROM projects')]
-                require(not matching_projects(projects, action.data.get('name', '')),
+                require(not matching_projects(projects, action.data.get('name', ''), max_level=4),
                         '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
             if action.intent == 'record_item' and not action.project_id:
                 name = action.data.get('project_name', '').strip()
@@ -411,7 +412,7 @@ class Service:
         else:
             require(not matching_projects(
                         [self.store.project(row) for row in db.execute('SELECT * FROM projects')],
-                        project['name']),
+                        project['name'], max_level=4),
                     '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
             version = 1
             pid = db.execute('INSERT INTO projects(version,data) VALUES(1,?)', (encode_project(project),)).lastrowid
@@ -446,7 +447,7 @@ class Service:
             p['owner_assignments'] = p.get('owner_assignments', [])
             p['owner_name'] = users.get(p['owner_id']) or p.get('owner_name') or '待明确'
             for n in p['milestones']:
-                n['owner_name'] = users.get(n['owner_id'], '待明确')
+                n['owner_name'] = users.get(n['owner_id']) or n.get('owner_name') or '待明确'
             decorate(p, self.clock(), settings)
         projects.sort(key=lambda p: (-p['risk_score'], p['due_date'] or '9999-12-31', p['id']))
         if display:
