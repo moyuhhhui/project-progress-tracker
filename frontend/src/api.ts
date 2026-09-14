@@ -3,10 +3,12 @@ export class ApiError extends Error {
   constructor(message: string, status: number) { super(message); this.status = status }
 }
 export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  const prefix = import.meta.env.BASE_URL === '/' ? '' : import.meta.env.BASE_URL.replace(/\/$/, '')
+  const apiPath = `${prefix}${path}`
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), path === '/api/messages' ? 60_000 : 20_000)
   try {
-    const response = await fetch(path, {
+    const response = await fetch(apiPath, {
       method, headers: { ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}) },
       ...(method !== 'GET' ? { body: JSON.stringify(body ?? {}) } : {}), signal: controller.signal, cache: 'no-store',
     })
