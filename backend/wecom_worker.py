@@ -5,12 +5,20 @@ import importlib.util
 import json
 import os
 import secrets
+import sys
 from datetime import datetime, timezone
 
 from .app import ai
 from .app.service import BusinessError, Service, require
 from .app.store import Store
 from .app.wecom import BotHandler, BotRuntime, validate_web_url
+
+
+def _configure_console_encoding():
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure:
+            reconfigure(encoding='utf-8', errors='replace')
 
 
 class QuietSDKLogger:
