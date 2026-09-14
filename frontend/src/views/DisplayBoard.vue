@@ -77,7 +77,7 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
             <header class="calendar-date"><time :datetime="day.date">{{ timelineDate(day.date) }}</time><span v-if="day.date === currentDate">今天</span></header>
             <div class="calendar-events">
               <article v-for="item in day.items" :key="item.id" class="calendar-event" :class="[`status-${arrangementPresentation(item).tone}`, `project-tone-${projectColorTone(item.projectId)}`]">
-                <span class="calendar-project">{{ item.code }} {{ item.projectName }}</span><strong>{{ item.target }}</strong>
+                <span class="calendar-project">{{ item.code }} {{ item.projectName }}</span><strong>{{ item.target }}</strong><span v-if="item.meeting" class="item-meta">{{ item.timeText }}</span>
                 <span class="calendar-owners"><span v-for="person in item.owners" :key="`${person.role}-${person.name}`"><b :class="`role-${ownerRoleTone(person.role)}`">{{ ownerRoleLabel(person.role, person.primary) }}</b>{{ person.name }}</span></span>
                 <div class="item-meta"><span>{{ item.action }}</span><b>{{ arrangementPresentation(item).label }}</b></div>
               </article>
@@ -109,3 +109,4 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
 .timeline-item.status-active{background:#e9f6ef;border-color:#8ed0b0;color:#28775a}.timeline-item.status-active strong{color:#28775a}
 .timeline-project-block{display:flex;flex-direction:column;align-items:flex-start;gap:4px}.timeline-owners{display:flex;flex-wrap:wrap;gap:3px 6px;font-size:9px}.timeline-owners>span{display:inline-flex;align-items:center;gap:3px}.timeline-owners b,.calendar-owners b{font-size:8px;border-radius:3px;padding:0 3px}.timeline-owners b.role-primary,.calendar-owners b.role-primary{color:#3068da;background:#eef3ff}.timeline-owners b.role-secondary,.calendar-owners b.role-secondary{color:#7a54a6;background:#f3edfa}.timeline-owners b.role-neutral,.calendar-owners b.role-neutral{color:#526176;background:#ffffffb8}
 </style>
+
