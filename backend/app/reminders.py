@@ -28,6 +28,10 @@ def reminder_flags():
     return picked or DEFAULT_REMINDER_FLAGS
 
 
+def group_webhook_configured():
+    return os.getenv('TRACKER_WECOM_SEND_ENABLED') == 'true' and bool(os.getenv('WECOM_GROUP_WEBHOOK_URL', '').strip())
+
+
 def is_workday(day, settings):
     return settings.workday_overrides.get(day.isoformat(), day.weekday() < 5)
 
@@ -134,7 +138,8 @@ def scan(store, now=None):
                 key = f"{node['id']}:{day}"
                 active_ids.add(key)
                 user = store.user(db, node['owner_id'])
-                valid_owner = user and user['active'] and user['wecom_user_id'] and user['role'] != 'display'
+                valid_owner = user and user['active'] and user['role'] != 'display' and (
+                    group_webhook_configured() or user['wecom_user_id'])
                 status, detail = ('queued', '') if valid_owner else ('blocked', '负责人未启用或未绑定企微账号')
                 old = db.execute('SELECT * FROM reminders WHERE id=?', (key,)).fetchone()
                 if old and old['status'] in ('accepted', 'sending', 'uncertain'):
@@ -198,7 +203,88 @@ class WeComSender:
             return 'uncertain', '发送结果不确定，停止自动重试并请管理员核对'
 
 
+class WeComGroupWebhookSender:
+    @property
+    def configured(self):
+        return group_webhook_configured()
+
+    def send(self, content):
+        if not self.configured:
+            return 'blocked', '企微群机器人未启用或 Webhook 未配置'
+        try:
+            with httpx.Client(timeout=httpx.Timeout(15, connect=5)) as client:
+                response = client.post(os.environ['WECOM_GROUP_WEBHOOK_URL'], json={
+                    'msgtype': 'text', 'text': {'content': content}})
+                response.raise_for_status()
+                result = response.json()
+            if not isinstance(result, dict) or type(result.get('errcode')) is not int:
+                return 'uncertain', '群机器人响应格式异常，需人工核对'
+            if result.get('errcode') != 0:
+                return 'failed', f"群机器人拒绝消息，错误码：{result.get('errcode', 'unknown')}"
+            return 'accepted', '群机器人平台已接受，不代表群成员已读'
+        except (httpx.HTTPError, ValueError):
+            return 'uncertain', '群机器人发送结果不确定，停止自动重试并请管理员核对'
+
+
+def dispatch_group(store, sender=None, now=None):
+    sender, now = sender or WeComGroupWebhookSender(), now or now_local()
+    settings = store.settings()
+    flags = reminder_flags()
+    if not is_workday(now.date(), settings) or not settings.start_hour <= now.hour < settings.end_hour:
+        return 0
+    with store.connect() as db:
+        rows = db.execute("SELECT * FROM reminders WHERE local_day=? AND status IN ('queued','blocked','failed') "
+                          "AND attempts<3 AND (next_attempt IS NULL OR next_attempt<=?) "
+                          "ORDER BY project_id,milestone_id", (now.date().isoformat(), now.isoformat())).fetchall()
+    pending, batches = [], []
+    for row in rows:
+        with store.connect(write=True) as db:
+            user = store.user(db, row['owner_id'])
+            project = store.project(db.execute('SELECT * FROM projects WHERE id=?', (row['project_id'],)).fetchone())
+        node = next((n for n in project['milestones'] if n['id'] == row['milestone_id']), None) if project else None
+        reasons = [f for f in node_flags(project, node, now, settings) if f in flags] if node else []
+        if not node or not user or not user['active'] or user['role'] == 'display' or not reasons:
+            with store.connect(write=True) as db:
+                db.execute("UPDATE reminders SET status='cancelled',detail='发送前校验已失效',updated_at=? WHERE id=?",
+                           (now.isoformat(), row['id']))
+            continue
+        if not sender.configured:
+            with store.connect(write=True) as db:
+                db.execute("UPDATE reminders SET status='blocked',detail='企微群机器人未配置',updated_at=? WHERE id=?",
+                           (now.isoformat(), row['id']))
+            continue
+        entry = (f"{project['code']} {project['name']} · {node['name']}\n"
+                 f"进度 {node['progress']}%｜截止 {node['due_date']}\n"
+                 + '、'.join(LABELS[r] for r in reasons))
+        if pending and len(('\n\n'.join(item[1] for item in pending+[('' , entry)])).encode('utf-8')) > 1700:
+            batches.append(pending)
+            pending = []
+        pending.append((row['id'], entry))
+    if pending:
+        batches.append(pending)
+    sent = 0
+    for batch in batches[:20]:
+        ids = [item[0] for item in batch]
+        with store.connect(write=True) as db:
+            for key in ids:
+                db.execute("UPDATE reminders SET status='sending',attempts=attempts+1,updated_at=? WHERE id=?",
+                           (now.isoformat(), key))
+        content = '【项目进度提醒】\n\n' + '\n\n'.join(item[1] for item in batch) + '\n\n请更新最新进展、阻碍和下一步安排。'
+        try:
+            status, detail = sender.send(content)
+        except Exception:
+            status, detail = 'uncertain', '群机器人通道异常，发送结果需人工核对'
+        with store.connect(write=True) as db:
+            for key in ids:
+                db.execute('UPDATE reminders SET status=?,detail=?,updated_at=?,next_attempt=? WHERE id=?',
+                           (status, detail, now.isoformat(), (now + timedelta(minutes=10)).isoformat(), key))
+        sent += len(ids) if status == 'accepted' else 0
+    return sent
+
+
 def dispatch(store, sender=None, now=None):
+    if group_webhook_configured():
+        return dispatch_group(store, sender, now)
     sender, now = sender or WeComSender(), now or now_local()
     settings = store.settings()
     flags = reminder_flags()
