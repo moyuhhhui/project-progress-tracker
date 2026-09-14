@@ -12,6 +12,21 @@ from .store import encode, encode_project
 
 LABELS = {'overdue': '计划逾期', 'stale': '待更新', 'due_soon': '临近到期', 'blocked': '有阻碍'}
 
+# 触发催办提醒的原因，由 TRACKER_REMINDER_REASONS 控制（逗号分隔，可选 overdue / stale / due_soon）。
+# 未配置时沿用全部原因，与既定行为一致；只填 due_soon 即仅在临近到期时催办，
+# 逾期与待更新仍照常在大屏和项目卡片上展示，只是不再生成催办任务。
+# scan() 与 dispatch() 共用同一个取值函数，避免入队与发送前校验口径不一致。
+DEFAULT_REMINDER_FLAGS = ('overdue', 'stale', 'due_soon')
+
+
+def reminder_flags():
+    raw = os.getenv('TRACKER_REMINDER_REASONS', '').strip()
+    if not raw:
+        return DEFAULT_REMINDER_FLAGS
+    wanted = {part.strip() for part in raw.split(',') if part.strip()}
+    picked = tuple(flag for flag in DEFAULT_REMINDER_FLAGS if flag in wanted)
+    return picked or DEFAULT_REMINDER_FLAGS
+
 
 def is_workday(day, settings):
     return settings.workday_overrides.get(day.isoformat(), day.weekday() < 5)
@@ -103,6 +118,7 @@ def scan(store, now=None):
     now = now or now_local()
     settings = store.settings()
     day, at = now.date().isoformat(), now.isoformat()
+    flags = reminder_flags()
     generated = 0
     with store.connect(write=True) as db:
         # 未发送的旧日任务不补发；已在途消息保留独立结果，不伪造撤回。
@@ -112,7 +128,7 @@ def scan(store, now=None):
         for row in db.execute('SELECT * FROM projects').fetchall():
             project = store.project(row)
             for node in project['milestones']:
-                reasons = [r for r in node_flags(project, node, now, settings) if r != 'blocked']
+                reasons = [r for r in node_flags(project, node, now, settings) if r in flags]
                 if not reasons:
                     continue
                 key = f"{node['id']}:{day}"
@@ -185,6 +201,7 @@ class WeComSender:
 def dispatch(store, sender=None, now=None):
     sender, now = sender or WeComSender(), now or now_local()
     settings = store.settings()
+    flags = reminder_flags()
     if not is_workday(now.date(), settings) or not settings.start_hour <= now.hour < settings.end_hour:
         return 0
     sent, batches = 0, 0
@@ -205,7 +222,7 @@ def dispatch(store, sender=None, now=None):
             for row in rows:
                 project = store.project(db.execute('SELECT * FROM projects WHERE id=?', (row['project_id'],)).fetchone())
                 node = next((n for n in project['milestones'] if n['id'] == row['milestone_id']), None) if project else None
-                reasons = [f for f in node_flags(project,node,now,settings) if f != 'blocked'] if node else []
+                reasons = [f for f in node_flags(project,node,now,settings) if f in flags] if node else []
                 if not node or node['owner_id'] != uid or not reasons:
                     db.execute("UPDATE reminders SET status='cancelled',detail='发送前校验已失效' WHERE id=?", (row['id'],))
                     continue
