@@ -45,6 +45,20 @@ class WeComTests(unittest.TestCase):
         with self.store.connect() as db:
             return [dict(r) for r in db.execute('SELECT * FROM drafts')]
 
+    def test_query_reply_contains_project_and_milestone_status(self):
+        reply = self.handler.format_query_reply([{
+            'name': '仓储系统升级', 'code': 'P0001', 'status': 'active', 'owner_name': '柯金成',
+            'progress': 40, 'due_date': '2026-10-30', 'flags': ['blocked'],
+            'milestones': [{'name': '方案设计', 'status': 'paused', 'progress': 20,
+                            'owner_name': '朱浩', 'due_date': '2026-09-30',
+                            'blocker': '等待确认', 'next_step': '补充方案'}],
+        }])
+        self.assertIn('项目状态：仓储系统升级', reply)
+        self.assertIn('整体状态：进行中', reply)
+        self.assertIn('当前风险：有阻碍', reply)
+        self.assertIn('方案设计：已暂停，进度 20%', reply)
+        self.assertIn('阻碍：等待确认', reply)
+
     def legacy_group_draft(self):
         from backend.app.ai import save_incomplete
         draft = save_incomplete(self.service, self.admin, Action(intent='create_project'),

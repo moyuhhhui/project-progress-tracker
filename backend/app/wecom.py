@@ -12,6 +12,13 @@ from .service import BusinessError, require
 from .store import encode
 
 
+STATE_LABELS = {
+    'not_started': '未开始', 'active': '进行中', 'paused': '已暂停',
+    'completed': '已完成', 'cancelled': '已取消',
+}
+FLAG_LABELS = {'overdue': '逾期', 'stale': '待更新', 'due_soon': '临期', 'blocked': '有阻碍'}
+
+
 def validate_web_url(value):
     try:
         url = urlsplit(value)
@@ -48,6 +55,47 @@ class BotHandler:
                              (userid,)).fetchone()
             require(row, '请管理员在成员管理中配置你的企业微信成员 ID，并启用普通成员账号。', 403)
             return self.service.fresh_user(db, self.service.store.user(db, row['id']))
+
+    @staticmethod
+    def format_query_reply(projects):
+        """把查询结果整理成可直接发到企业微信群的状态摘要。"""
+        if not projects:
+            return '未找到可访问的项目。'
+        blocks = []
+        for project in projects[:10]:
+            status = STATE_LABELS.get(project.get('status'), project.get('status') or '未知')
+            progress = project.get('progress')
+            progress_text = '—' if progress is None else f'{progress}%'
+            owner = project.get('owner_name') or '待明确'
+            lines = [
+                f"项目状态：{project.get('name') or '未命名项目'}",
+                f"项目编号：{project.get('code') or '—'}",
+                f"整体状态：{status}",
+                f"项目负责人：{owner}",
+                f"项目进度：{progress_text}",
+                f"计划截止：{project.get('due_date') or '未设置'}",
+            ]
+            flags = [FLAG_LABELS.get(flag, flag) for flag in (project.get('flags') or [])]
+            if flags:
+                lines.append('当前风险：' + '、'.join(flags))
+            milestones = project.get('milestones') or []
+            if milestones:
+                lines.append('节点进度：')
+                for index, node in enumerate(milestones[:20], 1):
+                    node_status = STATE_LABELS.get(node.get('status'), node.get('status') or '未知')
+                    node_progress = node.get('progress')
+                    node_progress_text = '—' if node_progress is None else f'{node_progress}%'
+                    due = node.get('due_date') or '未设置'
+                    owner_name = node.get('owner_name') or '待明确'
+                    lines.append(f"{index}. {node.get('name') or '未命名节点'}：{node_status}，进度 {node_progress_text}，负责人 {owner_name}，截止 {due}")
+                    if node.get('blocker'):
+                        lines.append(f"   阻碍：{node['blocker']}")
+                    if node.get('next_step'):
+                        lines.append(f"   下一步：{node['next_step']}")
+            blocks.append('\n'.join(lines))
+        if len(projects) > 10:
+            blocks.append(f"其余 {len(projects) - 10} 个项目请打开工作台查看。")
+        return '\n\n'.join(blocks)
 
     async def handle(self, frame, parser=None):
         body = frame.get('body') if isinstance(frame, dict) else None
@@ -133,7 +181,7 @@ class BotHandler:
                         for item in result['failures'])
                 return reply
             if result['kind'] == 'query':
-                return f'请打开工作台查看项目：{self.web_url}/#projects'
+                return self.format_query_reply(result.get('projects') or []) + f'\n\n工作台：{self.web_url}/#projects'
             return '未识别到明确的项目操作，未修改数据。'
         except BusinessError as exc:
             if exc.status == 429:
