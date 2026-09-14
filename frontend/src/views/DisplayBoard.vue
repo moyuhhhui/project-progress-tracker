@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { arrangementPresentation, calendarRowTemplate, dateTime, errorText, isSnapshotStale, ownerRoleLabel, ownerRoleTone, planningOverview, projectColorTone, timelineStatusLabel, today } from '../domain'
-import type { Actor, Snapshot } from '../types'
+import type { Actor, Snapshot, Meeting } from '../types'
 import FullscreenButton from '../components/FullscreenButton.vue'
 
 defineProps<{ actor: Actor }>()
@@ -12,8 +12,9 @@ const now = ref(Date.now()), currentDate = ref(today()), calendarStart = ref('')
 const timelineRange = ref<'week' | 'month'>('week'), calendarRange = ref<'week' | 'month'>('week')
 const loading = ref(false), error = ref('')
 const projects = computed(() => snapshot.value?.projects || [])
-const timelineOverview = computed(() => planningOverview(projects.value, currentDate.value, timelineRange.value))
-const calendarOverview = computed(() => planningOverview(projects.value, calendarStart.value || currentDate.value, calendarRange.value))
+const meetings = computed<Meeting[]>(() => snapshot.value?.meetings || [])
+const timelineOverview = computed(() => planningOverview(projects.value, currentDate.value, timelineRange.value, meetings.value))
+const calendarOverview = computed(() => planningOverview(projects.value, calendarStart.value || currentDate.value, calendarRange.value, meetings.value))
 const calendarRows = computed(() => calendarRowTemplate(calendarOverview.value.calendarDays))
 const stale = computed(() => isSnapshotStale(lastSuccess.value, now.value))
 const time = computed(() => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false,

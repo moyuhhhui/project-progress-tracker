@@ -88,7 +88,7 @@ def create_app(db_path=None):
     @app.get('/api/display')
     def display(actor=Depends(user)):
         require(all_access(actor) or actor['role'] == 'display', '需要独立大屏账号',403)
-        return {'projects':service.projects(actor,display=True),'at':service.clock().isoformat()}
+        return {'projects':service.projects(actor,display=True), 'meetings': service.meetings(actor), 'at':service.clock().isoformat()}
 
     @app.post('/api/drafts')
     def draft(action: Action, actor=Depends(editor)):

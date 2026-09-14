@@ -34,7 +34,7 @@ export interface Draft {
 export interface IntegrationStatus {
   ai_configured: boolean; ai_model: string; wecom_inbound: string; wecom_send_enabled: boolean; message: string
 }
-export interface Snapshot { projects: Project[]; at: string }
+export interface Snapshot { projects: Project[]; meetings?: Meeting[]; at: string }
 export interface History {
   audit: { id: number; actor_name: string; at: string; intent: Intent; before_data: Project | null; after_data: Project }[]
   reports: { id: number; actor_name: string; at: string; milestone_id: string; data: Record<string, unknown> }[]
