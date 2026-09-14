@@ -81,7 +81,12 @@ export function ownerPresentation(project: Pick<Project, 'owner_assignments' | '
       ? Object.entries(project.owner_roles || {}).map(([id, role]) => ({
           name: users.find(user => user.id === id)?.name || '成员不可用', role, primary: false,
         }))
-      : [{ name: project.owner_name || '待明确', role: '', primary: false }]
+      : project.owner_name
+        ? project.owner_name.split(/[、,，]/).map(part => {
+            const match = part.trim().match(/^(.+?)[（(](A角|B角|A1|A2|B1|B2|主责|搭档)[）)]$/)
+            return match ? { name: match[1]!.trim(), role: match[2]!, primary: /^A/.test(match[2]!) } : { name: part.trim(), role: '', primary: false }
+          }).filter(item => item.name)
+        : [{ name: '待明确', role: '', primary: false }]
   const order = ['A角', 'A1', 'A2', 'B角', 'B1', 'B2']
   return assignments.sort((left, right) => {
     const leftIndex = order.indexOf(ownerRoleLabel(left.role))
