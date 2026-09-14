@@ -171,7 +171,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
       flags: node ? node.flags || [] : project.flags || [],
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
-      owners: ownerPresentation(project, []),
+      owners: ownerPresentation(project, []), meeting: false,
     }))).concat(meetings.filter(meeting => meeting.status === 'active').map(meeting => {
       const start = new Date(meeting.start_at)
       const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(start)
