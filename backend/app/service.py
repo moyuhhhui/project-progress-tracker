@@ -484,12 +484,12 @@ class Service:
             result['attendee_ids'] = json.loads(result['attendee_ids'])
             return result
 
-    def meetings(self, user):
+    def meetings(self, user, display=False):
         with self.store.connect() as db:
-            actor = self.fresh_user(db, user)
+            actor = user if display and user['role'] == 'display' else self.fresh_user(db, user)
             rows = [dict(r) for r in db.execute(
                 'SELECT * FROM meetings WHERE status=? AND (created_by=? OR attendee_ids LIKE ? OR ?)',
-                ('active', actor['id'], f'%"{actor["id"]}"%', all_access(actor))).fetchall()]
+                ('active', actor['id'], f'%"{actor["id"]}"%', all_access(actor) or display)).fetchall()]
             for row in rows:
                 row['attendee_ids'] = json.loads(row['attendee_ids'])
             return rows

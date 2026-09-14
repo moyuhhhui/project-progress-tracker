@@ -50,7 +50,7 @@ function previewSettings() {
   if (!value || !old) return
   if (value.end_hour <= value.start_hour) { error.value = '发送结束时间必须晚于开始时间'; return }
   const rows: Review['rows'] = []
-  for (const [key, label] of [['start_hour', '发送开始时刻'], ['end_hour', '发送结束时刻'], ['due_hour', '计划截止时刻']] as const) {
+  for (const [key, label] of [['start_hour', '发送开始时刻'], ['end_hour', '发送结束时刻'], ['due_hour', '计划截止时刻'], ['reminder_hour', '项目提醒时刻']] as const) {
     if (value[key] !== old[key]) rows.push({ label, before: `${old[key]}:00`, after: `${value[key]}:00` })
   }
   const dates = new Set([...Object.keys(old.workday_overrides), ...Object.keys(value.workday_overrides)])
@@ -84,7 +84,7 @@ onMounted(loadSettings)
     <el-table-column label="操作" width="120"><template #default="{ row }"><el-button text type="primary" @click="editUser(row)">编辑</el-button></template></el-table-column>
   </el-table><p class="fine-print">大屏直接打开，展示已开启“大屏可见”的项目。<a href="#display" target="_blank" rel="noopener noreferrer">打开大屏 ↗</a></p></section>
   <section v-if="settings" class="panel section-gap"><h2>提醒与工作日历</h2><p class="muted">时区：Asia/Shanghai。默认周一至周五为工作日；法定节假日和调休需要手工配置。</p>
-    <el-form label-position="top"><div class="form-grid three"><el-form-item label="发送开始时刻（整点）"><el-input-number v-model="settings.start_hour" :min="0" :max="22" :precision="0" /></el-form-item><el-form-item label="发送结束时刻（整点）"><el-input-number v-model="settings.end_hour" :min="1" :max="23" :precision="0" /></el-form-item><el-form-item label="计划截止时刻（整点）"><el-input-number v-model="settings.due_hour" :min="0" :max="23" :precision="0" /></el-form-item></div>
+    <el-form label-position="top"><div class="form-grid three"><el-form-item label="发送开始时刻（整点）"><el-input-number v-model="settings.start_hour" :min="0" :max="22" :precision="0" /></el-form-item><el-form-item label="发送结束时刻（整点）"><el-input-number v-model="settings.end_hour" :min="1" :max="23" :precision="0" /></el-form-item><el-form-item label="计划截止时刻（整点）"><el-input-number v-model="settings.due_hour" :min="0" :max="23" :precision="0" /></el-form-item><el-form-item label="项目提醒时刻（整点）"><el-input-number v-model="settings.reminder_hour" :min="0" :max="23" :precision="0" /></el-form-item></div>
     <div class="calendar-controls"><el-date-picker v-model="day" value-format="YYYY-MM-DD" placeholder="选择覆盖日期" aria-label="日历覆盖日期" /><el-switch v-model="workday" active-text="工作日" inactive-text="休息日" /><el-button :disabled="!day" @click="addDay">添加 / 更新日期</el-button></div>
     <el-table :data="calendar" max-height="280" empty-text="暂无覆盖，采用周一至周五默认日历"><el-table-column prop="date" label="日期" /><el-table-column label="配置"><template #default="{ row }">{{ row.working ? '工作日' : '休息日' }}</template></el-table-column><el-table-column label="操作" width="120"><template #default="{ row }"><el-button text @click="delete settings.workday_overrides[row.date]">移除覆盖</el-button></template></el-table-column></el-table>
     <div class="form-footer"><el-button @click="loadSettings">重置未保存修改</el-button><el-button type="primary" @click="previewSettings">预览设置变更</el-button></div></el-form>

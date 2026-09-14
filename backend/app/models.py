@@ -200,6 +200,7 @@ class ReminderSettings(Contract):
     start_hour: Annotated[int, Field(strict=True, ge=0, le=22)] = 9
     end_hour: Annotated[int, Field(strict=True, ge=1, le=23)] = 18
     due_hour: Annotated[int, Field(strict=True, ge=0, le=23)] = 18
+    reminder_hour: Annotated[int, Field(strict=True, ge=0, le=23)] = 12
 
     @model_validator(mode='after')
     def valid(self):

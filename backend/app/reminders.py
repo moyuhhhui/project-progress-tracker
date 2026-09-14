@@ -267,7 +267,7 @@ def dispatch_group(store, sender=None, now=None):
     sender, now = sender or WeComGroupWebhookSender(), now or now_local()
     settings = store.settings()
     flags = reminder_flags()
-    if not is_workday(now.date(), settings) or not settings.start_hour <= now.hour < settings.end_hour:
+    if not is_workday(now.date(), settings) or now.hour != settings.reminder_hour:
         return 0
     with store.connect() as db:
         rows = db.execute("SELECT * FROM reminders WHERE local_day=? AND status IN ('queued','blocked','failed') "
@@ -325,7 +325,7 @@ def dispatch(store, sender=None, now=None):
     sender, now = sender or WeComSender(), now or now_local()
     settings = store.settings()
     flags = reminder_flags()
-    if not is_workday(now.date(), settings) or not settings.start_hour <= now.hour < settings.end_hour:
+    if not is_workday(now.date(), settings) or now.hour != settings.reminder_hour:
         return 0
     sent, batches = 0, 0
     with store.connect() as db:

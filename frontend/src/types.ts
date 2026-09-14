@@ -43,7 +43,7 @@ export interface Reminder {
   id: string; project_id: number; milestone_id: string; owner_name: string; reasons: Flag[]
   status: string; attempts: number; updated_at: string; detail: string
 }
-export interface Settings { start_hour: number; end_hour: number; due_hour: number; workday_overrides: Record<string, boolean> }
+export interface Settings { start_hour: number; end_hour: number; due_hour: number; reminder_hour: number; workday_overrides: Record<string, boolean> }
 export interface Meeting { id: string; start_at: string; title: string; project_id?: number | null; attendee_ids: string[]; location: string; notes: string; status: string }
 export type MessageResult = { kind: 'draft'; draft: Draft } | { kind: 'meeting'; meeting: Meeting } | { kind: 'query'; projects: Project[] } |
   { kind: 'ignored'; message: string }
