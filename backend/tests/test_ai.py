@@ -137,6 +137,23 @@ class AITests(unittest.TestCase):
         self.service.confirm(self.admin, draft['id'])
         self.assertEqual(self.replay(request)['projects'][0]['name'], '更新名称')
 
+    def test_tool_query_filters_requested_project(self):
+        draft = self.service.create_draft(self.admin, Action(intent='create_project', data={
+            'name': 'Second project', 'owner_id': self.admin['id'], 'member_ids': [self.member['id']],
+            'start_date': '2026-09-01', 'due_date': '2026-09-30', 'milestones': []}))
+        second_pid = self.service.confirm(self.admin, draft['id'])['project_id']
+        request = MessageInput(text=f'query project P{int(self.pid):04d}', client_message_id='tool-query-filter')
+
+        def fake_invoke(_prompt, accept):
+            accept('query_projects', {'project_id': f'P{int(self.pid):04d}'})
+
+        with patch('backend.app.ai.configured', return_value=True), \
+                patch('backend.app.ai.invoke_deepseek_tools', side_effect=fake_invoke):
+            result = asyncio.run(parse_message(self.service, self.admin, request, parser=None))
+
+        self.assertEqual([project['id'] for project in result['projects']], [self.pid])
+        self.assertNotIn(second_pid, [project['id'] for project in result['projects']])
+
     def test_cached_incomplete_preview_is_denied_after_revocation(self):
         request = MessageInput(text='调整项目', client_message_id='draft-00001')
         raw = json.dumps({'intent': 'edit_project', 'project_id': self.pid, 'missing_fields': ['reason']})

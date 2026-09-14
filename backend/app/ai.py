@@ -386,11 +386,22 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
         require(len(source) <= 16000, '对话过长，请重新描述本次操作')
         planned_actions, planned_failures = [], []
         query_requested = False
+        query_all_requested = False
+        query_project_ids = set()
         if parser is None:
             def accept(name, arguments):
-                nonlocal query_requested
+                nonlocal query_all_requested, query_requested
                 if name == 'query_projects':
                     query_requested = True
+                    project_id = arguments.get('project_id')
+                    if project_id:
+                        project = next((item for item in candidates
+                                        if item['id'] == project_id or
+                                        item['code'].casefold() == project_id.casefold()), None)
+                        require(project is not None, '模型引用了不可用的项目')
+                        query_project_ids.add(project['id'])
+                        return {'projects': [project]}
+                    query_all_requested = True
                     return {'projects': candidates}
                 try:
                     planned_actions.append(action_from_tool_call(
@@ -446,7 +457,10 @@ async def parse_message(service, user, request, parser=None, *, channel='web'):
                     service, user, planned_actions, source, channel=channel,
                     previous_draft_id=request.previous_draft_id, failures=planned_failures)
             elif query_requested:
-                result = {'kind': 'query', 'projects': service.projects(user)}
+                projects = service.projects(user)
+                if query_project_ids and not query_all_requested:
+                    projects = [project for project in projects if project['id'] in query_project_ids]
+                result = {'kind': 'query', 'projects': projects}
             else:
                 result = {'kind': 'ignored', 'message': '未识别到明确的项目操作，未修改数据。'}
             with service.store.connect(write=True) as db:
