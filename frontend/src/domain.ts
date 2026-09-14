@@ -159,7 +159,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
   const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) - rangeStartDate.getTime()) / 86_400_000) + 1
   const weekEnd = offset(7)
   const active = projects.filter(p => !['completed', 'cancelled'].includes(p.status))
-  const allItems: any[] = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
+  const allItems = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
     ? project.milestones.filter(n => n.status !== 'cancelled')
     : [null]).map(node => ({
       id: `${project.id}-${node?.id || 'project'}`, projectId: project.id, code: project.code,
