@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { dateTime, errorText } from '../domain'
-import type { Actor, Draft, Project, User, Snapshot, IntegrationStatus } from '../types'
+import type { Actor, Draft, Project, User, Snapshot, IntegrationStatus, Meeting } from '../types'
 import ProjectsPage from './ProjectsPage.vue'
 import RemindersPage from './RemindersPage.vue'
 import AdminPage from './AdminPage.vue'
@@ -10,7 +10,7 @@ import FullscreenButton from '../components/FullscreenButton.vue'
 
 const props = defineProps<{ actor: Actor }>()
 const section = ref('projects')
-const projects = ref<Project[]>([]), users = ref<User[]>([]), drafts = ref<Draft[]>([])
+const projects = ref<Project[]>([]), users = ref<User[]>([]), drafts = ref<Draft[]>([]), meetings = ref<Meeting[]>([])
 const status = ref<IntegrationStatus | null>(null), snapshotAt = ref(''), selectedDraft = ref<Draft | null>(null)
 const loading = ref(false), error = ref('')
 const titles: Record<string, string> = { projects: '项目进度', reminders: '提醒记录', admin: '成员与设置' }
@@ -21,9 +21,9 @@ async function refresh(silent = false) {
   refreshing = true
   loading.value = !silent; error.value = ''
   const results = await Promise.allSettled([
-    api<Snapshot>('/api/projects'), api<User[]>('/api/users'), api<Draft[]>('/api/drafts'), api<IntegrationStatus>('/api/status'),
+    api<Snapshot>('/api/projects'), api<User[]>('/api/users'), api<Draft[]>('/api/drafts'), api<IntegrationStatus>('/api/status'), api<{ meetings: Meeting[] }>('/api/meetings'),
   ])
-  const [p, u, d, s] = results
+  const [p, u, d, s, m] = results
   if (p.status === 'fulfilled') { projects.value = p.value.projects; snapshotAt.value = p.value.at }
   if (u.status === 'fulfilled') users.value = u.value
   if (d.status === 'fulfilled') {
@@ -31,6 +31,7 @@ async function refresh(silent = false) {
     if (selectedDraft.value) selectedDraft.value = d.value.find(draft => draft.id === selectedDraft.value?.id) || selectedDraft.value
   }
   if (s.status === 'fulfilled') status.value = s.value
+  if (m.status === 'fulfilled') meetings.value = m.value.meetings
   error.value = results.filter(r => r.status === 'rejected').map(r => errorText(r.reason)).join('；')
   loading.value = false
   refreshing = false
@@ -75,7 +76,7 @@ onBeforeUnmount(() => {
       <div class="page-content">
         <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="section-gap" />
         <div class="page-toolbar"><span class="muted">{{ snapshotAt ? `最近读取 ${dateTime(snapshotAt)} · 每 5 秒自动同步` : '正在连接数据服务' }}</span><el-button :loading="loading" @click="refresh()">刷新数据</el-button></div>
-        <ProjectsPage v-if="section === 'projects'" :actor="actor" :projects="projects" :users="users" :loading="loading" />
+        <ProjectsPage v-if="section === 'projects'" :actor="actor" :projects="projects" :users="users" :meetings="meetings" :loading="loading" />
         <RemindersPage v-if="section === 'reminders'" :actor="actor" :projects="projects" />
         <AdminPage v-if="section === 'admin' && (actor.internal_shared || actor.role === 'admin')" :actor="actor" :users="users" :status="status" @refresh="refresh" />
       </div>

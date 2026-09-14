@@ -1,22 +1,22 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { Actor, Intent, Milestone, Project, User } from '../types'
+import type { Actor, Intent, Milestone, Project, User, Meeting } from '../types'
 import { arrangementPresentation, editableStates, ownerRoleLabel, ownerRoleTone, planningOverview, projectColorTone, projectMoodSummary, stateLabels, timelineEmphasis, timelineStatusLabel, today } from '../domain'
 import StateBadge from '../components/StateBadge.vue'
 import OwnerRoles from '../components/OwnerRoles.vue'
 import ActionEditor from '../components/ActionEditor.vue'
 import ProjectDetail from '../components/ProjectDetail.vue'
 
-const props = defineProps<{ actor: Actor; projects: Project[]; users: User[]; loading: boolean }>()
+const props = defineProps<{ actor: Actor; projects: Project[]; users: User[]; meetings: Meeting[]; loading: boolean }>()
 const search = ref(''), stateFilter = ref(''), riskOnly = ref(false)
 const page = ref(1), selectedId = ref('')
 const currentDate = ref(today())
-const overview = computed(() => planningOverview(props.projects, currentDate.value))
+const overview = computed(() => planningOverview(props.projects, currentDate.value, undefined, props.meetings))
 const timelineRange = ref<'week' | 'month'>('week')
-const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value))
+const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value, props.meetings))
 const mood = computed(() => projectMoodSummary(props.projects))
 const calendarStart = ref(''), calendarRange = ref<'week' | 'month'>('week')
-const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value))
+const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value, props.meetings))
 const undatedGroups = computed(() => props.projects.map(project => ({
   project, items: overview.value.undated.filter(item => item.projectId === project.id),
 })).filter(group => group.items.length))

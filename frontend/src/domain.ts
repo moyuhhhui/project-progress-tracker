@@ -1,4 +1,4 @@
-import type { State, Flag, Intent, OwnerAssignment, Project, User } from './types'
+import type { State, Flag, Intent, OwnerAssignment, Project, User, Meeting } from './types'
 
 export const stateLabels: Record<State, string> = { not_started: '正常进行', active: '正常进行', paused: '暂停中', completed: '完成 · congratulation！', cancelled: '已取消' }
 export const editableStates: State[] = ['active', 'paused', 'completed']
@@ -144,7 +144,7 @@ export function calendarRowTemplate(days: { column: number; items: unknown[] }[]
     return `${Math.min(2.1, 1.5 + (count - 2) * .25)}fr`
   }).join(' ')
 }
-export function planningOverview(projects: Project[], date = today(), range?: PlanningRange) {
+export function planningOverview(projects: Project[], date = today(), range?: PlanningRange, meetings: Meeting[] = []) {
   const offset = (days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10)
   const reference = new Date(`${date}T00:00:00Z`)
   const rangeStart = range === 'week'
@@ -159,7 +159,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
   const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) - rangeStartDate.getTime()) / 86_400_000) + 1
   const weekEnd = offset(7)
   const active = projects.filter(p => !['completed', 'cancelled'].includes(p.status))
-  const allItems = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
+  const allItems: any[] = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
     ? project.milestones.filter(n => n.status !== 'cancelled')
     : [null]).map(node => ({
       id: `${project.id}-${node?.id || 'project'}`, projectId: project.id, code: project.code,
@@ -172,7 +172,14 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
       owners: ownerPresentation(project, []),
-    }))).sort((a, b) => a.date.localeCompare(b.date))
+    }))).concat(meetings.filter(meeting => meeting.status === 'active').map(meeting => {
+      const start = new Date(meeting.start_at)
+      const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(start)
+      const project = { id: String(meeting.project_id || meeting.id), code: meeting.project_id ? `P${String(meeting.project_id).padStart(4, '0')}` : '会议', name: meeting.project_id ? '项目会议' : '独立会议', status: 'active', milestones: [] } as unknown as Project
+      return { id: meeting.id, projectId: project.id, code: project.code, projectName: project.name, project,
+        target: meeting.title || '未命名会议', date: day, startDate: day, timeText: start.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }),
+        status: 'active', paused: false, flags: [], reason: '', owner: '', nextStep: '', owners: [] as OwnerAssignment[], meeting: true }
+    })).sort((a, b) => a.date.localeCompare(b.date))
   const items = allItems.filter(item => item.project.status !== 'completed' && item.status !== 'completed')
   const todayItems = items.filter(item => item.date === date)
   const week = items.filter(item => item.date > date && item.date <= weekEnd)
