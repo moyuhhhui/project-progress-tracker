@@ -7,8 +7,6 @@ from .models import (Action, MilestoneCreate, MilestonePatch, ProgressReport,
                      ProjectCreate, ProjectPatch, RecordItem, StatusChange, MeetingCreate)
 from .service import BusinessError, require
 
-MAX_TOOL_ROUNDS = 8
-
 TOOL_INTENTS = {
     'record_project_item': ('record_item', RecordItem, '按项目名称、负责人、书面化单句事项和截止时间记录一个项目的一项或多项安排'),
     'create_project': ('create_project', ProjectCreate, '创建没有具体事项的项目'),

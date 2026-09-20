@@ -34,12 +34,12 @@ class DeepSeekTests(unittest.TestCase):
             with patch('langchain_deepseek.ChatDeepSeek', side_effect=model):
                 return ai.invoke_deepseek('这是需要解析的项目消息')
 
-    def invoke_tools(self, tool_calls, accept):
+    def invoke_tools(self, tool_calls, accept, tool_responses=None):
         self.requests = []
-        responses = [
-            {'role': 'assistant', 'content': '', 'tool_calls': tool_calls},
-            {'role': 'assistant', 'content': 'DONE'},
-        ]
+        responses = tool_responses or [
+                {'role': 'assistant', 'content': '', 'tool_calls': tool_calls},
+                {'role': 'assistant', 'content': 'DONE'},
+            ]
 
         def respond(request):
             self.requests.append(request)
@@ -119,6 +119,22 @@ class DeepSeekTests(unittest.TestCase):
 
         self.assertEqual(len(result), 21)
         self.assertEqual(accepted, [f'项目{index}' for index in range(21)])
+
+    def test_native_sdk_does_not_stop_at_eight_tool_rounds(self):
+        rounds = [[self.tool_call(f'round-{index}', 'record_project_item', {
+            'data': {'project_name': f'第{index}轮项目', 'text': '记录安排'}
+        })] for index in range(9)]
+        responses = [
+            {'role': 'assistant', 'content': '', 'tool_calls': calls}
+            for calls in rounds
+        ] + [{'role': 'assistant', 'content': 'DONE'}]
+        accepted = []
+
+        result = self.invoke_tools([], lambda name, arguments: (
+            accepted.append(arguments['data']['project_name']) or {'accepted': True}), responses)
+
+        self.assertEqual(len(result), 9)
+        self.assertEqual(accepted, [f'第{index}轮项目' for index in range(9)])
 
     def test_native_sdk_rejects_unregistered_tool(self):
         calls = [self.tool_call('call-unknown', 'drop_database', {})]

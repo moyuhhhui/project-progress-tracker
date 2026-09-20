@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from .models import (Action, ParsedMessage, ProjectCreate, ProjectPatch, MilestoneCreate,
                      MilestonePatch, ProgressReport, StatusChange, RecordItem, MeetingCreate)
-from .ai_tools import (MAX_TOOL_ROUNDS, TOOL_INTENTS,
+from .ai_tools import (TOOL_INTENTS,
                        action_from_tool_call, business_tool_schemas, data_schema)
 from .service import (BusinessError, require, all_access, matching_projects,
                       project_name_match_level)
@@ -186,7 +186,7 @@ def invoke_deepseek(prompt):
 
 
 def invoke_deepseek_tools(prompt, accept):
-    """执行受限的模型/工具循环，并返回已接受的工具调用。"""
+    """执行模型/工具循环，并返回已接受的工具调用。"""
     from langchain_core.messages import ToolMessage
     from langchain_deepseek import ChatDeepSeek
 
@@ -200,7 +200,7 @@ def invoke_deepseek_tools(prompt, accept):
     accepted = []
     try:
         bound = model.bind_tools(business_tool_schemas())
-        for _ in range(MAX_TOOL_ROUNDS):
+        while True:
             response = bound.invoke(messages)
             finish = response.response_metadata.get('finish_reason')
             require(finish in ('stop', 'tool_calls'),
@@ -220,7 +220,6 @@ def invoke_deepseek_tools(prompt, accept):
                 messages.append(ToolMessage(
                     content=json.dumps(result, ensure_ascii=False),
                     tool_call_id=call['id'], name=name))
-        raise BusinessError(f'模型工具调用超过 {MAX_TOOL_ROUNDS} 轮，未继续执行。')
     except BusinessError:
         raise
     except Exception as exc:
