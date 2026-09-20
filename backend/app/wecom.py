@@ -32,11 +32,11 @@ def validate_web_url(value):
         valid = (url.scheme in ('http', 'https') and url.hostname and url.port != 0
                  and not is_loopback
                  and not url.username and not url.password and not url.query and not url.fragment
-                 and url.path in ('', '/') and not any(c.isspace() for c in value)
+                 and url.path.startswith('/') and not any(c.isspace() for c in value)
                  and not any(c in value for c in '[]()<>\\'))
     except ValueError:
         valid = False
-    require(valid, 'TRACKER_WEB_URL 须为员工可访问的 http(s) 根地址，不含账号、查询参数或片段')
+    require(valid, 'TRACKER_WEB_URL 须为员工可访问的 http(s) 地址，不含账号、查询参数或片段')
     return value.rstrip('/')
 
 

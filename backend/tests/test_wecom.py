@@ -295,10 +295,11 @@ class WeComTests(unittest.TestCase):
     def test_public_url_must_not_contain_credentials_or_query(self):
         for url in ('', 'javascript:alert(1)', 'https://user:password@example.com',
                     'https://example.com/?token=secret', 'https://example.com/#display',
-                    'https://example.com/subpath', 'https://example.com/\n'):
+                    'https://example.com/\n'):
             with self.assertRaises(BusinessError):
                 validate_web_url(url)
         self.assertEqual(validate_web_url('https://tracker.example/'), 'https://tracker.example')
+        self.assertEqual(validate_web_url('https://tracker.example/subpath/'), 'https://tracker.example/subpath')
 
     def test_web_and_wecom_message_ids_do_not_collide(self):
         request = MessageInput(text='创建', client_message_id='same-message-key')
