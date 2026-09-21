@@ -1,12 +1,12 @@
-import type { State, Flag, Intent, OwnerAssignment, Project, User, Meeting } from './types'
+import type { State, Flag, Intent, OwnerAssignment, Project, User } from './types'
 
-export const stateLabels: Record<State, string> = { not_started: '正常进行', active: '正常进行', paused: '暂停中', completed: '完成 · congratulation！', cancelled: '已取消' }
+export const stateLabels: Record<State, string> = { active: '正常进行', paused: '暂停中', completed: '完成 · congratulation！', cancelled: '已取消' }
 export const editableStates: State[] = ['active', 'paused', 'completed']
 export const flagLabels: Record<Flag, string> = { overdue: '计划逾期', stale: '待更新', due_soon: '临期', blocked: '有阻碍' }
 export const intentLabels: Record<Intent, string> = {
   record_item: '记录项目事项',
   create_project: '创建项目', edit_project: '调整项目信息', add_milestone: '新增项目事项', edit_milestone: '调整项目事项',
-  report_progress: '汇报进度', project_status: '变更项目状态', milestone_status: '变更目标状态', create_meeting: '会议', query: '查询项目', ignore: '无操作',
+  report_progress: '汇报进度', project_status: '变更项目状态', milestone_status: '变更目标状态', create_meeting: '记录会议', query: '查询项目', ignore: '无操作',
 }
 export const fieldLabels: Record<string, string> = {
   owner_name: '负责人姓名',
@@ -69,53 +69,19 @@ export function arrangementPresentation(item: { status: string; paused: boolean 
   if (item.paused) return { label: '暂停中', tone: 'paused' as const }
   return { label: '进行中', tone: 'active' as const }
 }
-export function timelineStatusLabel(item: { status: string; paused: boolean; flags?: Flag[] }) {
-  const label = arrangementPresentation(item).label
-  return label === '进行中' && item.flags?.includes('overdue') ? '逾期' : label
-}
 export function ownerPresentation(project: Pick<Project, 'owner_assignments' | 'owner_roles' | 'owner_name'>,
   users: User[]): OwnerAssignment[] {
-  const assignments = project.owner_assignments?.length
-    ? project.owner_assignments.map(item => ({ ...item }))
-    : Object.keys(project.owner_roles || {}).length
-      ? Object.entries(project.owner_roles || {}).map(([id, role]) => ({
-          name: users.find(user => user.id === id)?.name || '成员不可用', role, primary: false,
-        }))
-      : project.owner_name
-        ? project.owner_name.split(/[、,，]/).map(part => {
-            const match = part.trim().match(/^(.+?)[（(](A角|B角|A1|A2|B1|B2|主责|搭档)[）)]$/)
-            return match ? { name: match[1]!.trim(), role: match[2]!, primary: /^A/.test(match[2]!) } : { name: part.trim(), role: '', primary: false }
-          }).filter(item => item.name)
-        : [{ name: '待明确', role: '', primary: false }]
-  const order = ['A角', 'A1', 'A2', 'B角', 'B1', 'B2']
-  return assignments.sort((left, right) => {
-    const leftIndex = order.indexOf(ownerRoleLabel(left.role))
-    const rightIndex = order.indexOf(ownerRoleLabel(right.role))
-    return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex)
-  })
-}
-export function ownerRoleLabel(role: string, primary = false) {
-  const value = role.toUpperCase()
-  if (value === 'A') return 'A角'
-  if (value === 'B') return 'B角'
-  return value || (primary ? 'A角' : '负责人')
-}
-export function ownerRoleMark(role: string, primary = false) {
-  const value = ownerRoleLabel(role, primary)
-  return value === 'A角' ? 'A' : value === 'B角' ? 'B' : value
-}
-export function ownerRoleTone(role: string) {
-  const value = ownerRoleLabel(role)
-  if (/^A(?:角|1|2)$/.test(value)) return 'primary'
-  if (/^B(?:角|1|2)$/.test(value)) return 'secondary'
-  return 'neutral'
+  if (project.owner_assignments?.length) return project.owner_assignments.map(item => ({ ...item }))
+  if (Object.keys(project.owner_roles || {}).length) return Object.entries(project.owner_roles || {}).map(([id, role]) => ({
+    name: users.find(user => user.id === id)?.name || '成员不可用', role, primary: false,
+  }))
+  return [{ name: project.owner_name || '待明确', role: '', primary: false }]
 }
 export function projectMoodSummary(projects: Pick<Project, 'status' | 'flags'>[]) {
   const attention = projects.filter(project => !['completed', 'cancelled'].includes(project.status) && project.flags?.length).length
   return {
     total: projects.length,
     cards: [
-      { tone: 'preparation', label: '前期准备', count: projects.filter(project => project.status === 'not_started').length, message: '正在蓄力' },
       { tone: 'active', label: '进行中', count: projects.filter(project => project.status === 'active').length, message: '保持节奏' },
       { tone: 'completed', label: '已完成', count: projects.filter(project => project.status === 'completed').length, message: 'Congratulations！' },
       { tone: 'attention', label: '需要关注', count: attention, message: attention ? '及时处理' : '一切顺利' },
@@ -131,8 +97,9 @@ export function projectColorTone(projectId: string): ProjectColorTone {
     : [...projectId].reduce((sum, character) => sum + character.codePointAt(0)!, 0)
   return tones[seed % tones.length]!
 }
-export type TimelineEmphasis = 'near' | 'far'
+export type TimelineEmphasis = 'warning' | 'near' | 'far'
 export function timelineEmphasis(date: string, currentDate = today()): TimelineEmphasis {
+  if (date < currentDate) return 'warning'
   const nearEnd = new Date(Date.parse(`${currentDate}T00:00:00Z`) + 10 * 86_400_000).toISOString().slice(0, 10)
   return date <= nearEnd ? 'near' : 'far'
 }
@@ -153,23 +120,20 @@ export function calendarRowTemplate(days: { column: number; items: unknown[] }[]
     return `${Math.min(2.1, 1.5 + (count - 2) * .25)}fr`
   }).join(' ')
 }
-export function planningOverview(projects: Project[], date = today(), range?: PlanningRange, meetings: Meeting[] = [], users: User[] = []) {
+export function planningOverview(projects: Project[], date = today(), range?: PlanningRange) {
   const offset = (days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10)
   const reference = new Date(`${date}T00:00:00Z`)
-  const mondayOffset = -((reference.getUTCDay() + 6) % 7)
-  const workWeekStart = offset(mondayOffset)
-  const workWeekEnd = offset(mondayOffset + 3)
   const rangeStart = range === 'week'
-    ? workWeekStart
+    ? offset(-((reference.getUTCDay() + 6) % 7))
     : range === 'month' ? `${date.slice(0, 7)}-01` : date
   const rangeStartDate = new Date(`${rangeStart}T00:00:00Z`)
   const endDate = range === 'week'
-    ? workWeekEnd
+    ? new Date(rangeStartDate.getTime() + 6 * 86_400_000).toISOString().slice(0, 10)
     : range === 'month'
       ? new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth() + 1, 0)).toISOString().slice(0, 10)
       : offset(9)
   const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) - rangeStartDate.getTime()) / 86_400_000) + 1
-  const weekEnd = workWeekEnd
+  const weekEnd = offset(7)
   const active = projects.filter(p => !['completed', 'cancelled'].includes(p.status))
   const allItems = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
     ? project.milestones.filter(n => n.status !== 'cancelled')
@@ -180,24 +144,16 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
       startDate: (node ? node.start_date : project.start_date) || '',
       timeText: node?.time_text || '',
       status: node?.status || project.status, paused: project.status === 'paused' || node?.status === 'paused',
-      flags: node ? node.flags || [] : project.flags || [],
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
-      owners: ownerPresentation(project, users), meeting: false,
-    }))).concat(meetings.filter(meeting => meeting.status === 'active').map(meeting => {
-      const start = new Date(meeting.start_at)
-      const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(start)
-      const project = { id: String(meeting.project_id || meeting.id), code: meeting.project_id ? `P${String(meeting.project_id).padStart(4, '0')}` : '会议', name: meeting.project_id ? '项目会议' : '独立会议', status: 'active', milestones: [] } as unknown as Project
-      return { id: meeting.id, projectId: project.id, code: project.code, projectName: project.name, project,
-        target: meeting.title || '未命名会议', date: day, startDate: day, timeText: start.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }),
-        status: 'active', paused: false, flags: [], reason: '', owner: '', nextStep: '', owners: [] as OwnerAssignment[], meeting: true }
-    })).sort((a, b) => a.date.localeCompare(b.date))
+      owners: ownerPresentation(project, []),
+    }))).sort((a, b) => a.date.localeCompare(b.date))
   const items = allItems.filter(item => item.project.status !== 'completed' && item.status !== 'completed')
   const todayItems = items.filter(item => item.date === date)
   const week = items.filter(item => item.date > date && item.date <= weekEnd)
   const flex = items.filter(item => !item.date)
-  const groups = Array.from(new Set(allItems.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
-    .map(day => ({ date: day, items: allItems.filter(item => item.date === day) }))
+  const groups = Array.from(new Set(items.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
+    .map(day => ({ date: day, items: items.filter(item => item.date === day) }))
   const inRange = (day: string) => day >= rangeStart && day <= endDate
   const upcoming = items.filter(item => !item.paused && (inRange(item.date) || inRange(item.startDate)))
     .map(item => ({ ...item, actionDate: inRange(item.date) ? item.date : item.startDate,

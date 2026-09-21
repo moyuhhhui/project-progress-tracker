@@ -1,4 +1,4 @@
-"""提醒只依赖已确认数据；不调用模型，也不把通知成功当作员工已读。"""
+"""提醒只依赖已保存正式数据；不调用模型，也不把通知成功当作员工已读。"""
 import copy
 import json
 import os
@@ -11,25 +11,6 @@ from .service import TZ, now_local
 from .store import encode, encode_project
 
 LABELS = {'overdue': '计划逾期', 'stale': '待更新', 'due_soon': '临近到期', 'blocked': '有阻碍'}
-
-# 触发催办提醒的原因，由 TRACKER_REMINDER_REASONS 控制（逗号分隔，可选 overdue / stale / due_soon）。
-# 未配置时沿用全部原因，与既定行为一致；只填 due_soon 即仅在临近到期时催办，
-# 逾期与待更新仍照常在大屏和项目卡片上展示，只是不再生成催办任务。
-# scan() 与 dispatch() 共用同一个取值函数，避免入队与发送前校验口径不一致。
-DEFAULT_REMINDER_FLAGS = ('overdue', 'stale', 'due_soon')
-
-
-def reminder_flags():
-    raw = os.getenv('TRACKER_REMINDER_REASONS', '').strip()
-    if not raw:
-        return DEFAULT_REMINDER_FLAGS
-    wanted = {part.strip() for part in raw.split(',') if part.strip()}
-    picked = tuple(flag for flag in DEFAULT_REMINDER_FLAGS if flag in wanted)
-    return picked or DEFAULT_REMINDER_FLAGS
-
-
-def group_webhook_configured():
-    return os.getenv('TRACKER_WECOM_SEND_ENABLED') == 'true' and bool(os.getenv('WECOM_GROUP_WEBHOOK_URL', '').strip())
 
 
 def is_workday(day, settings):
@@ -92,7 +73,7 @@ def auto_complete_due(store, now=None):
             before = copy.deepcopy(project)
             changed = 0
             for node in project['milestones']:
-                if node['status'] not in ('not_started', 'active') or not node.get('due_date'):
+                if node['status'] != 'active' or not node.get('due_date'):
                     continue
                 if (node.get('auto_complete_disabled') or node.get('last_report_at') or node.get('paused_at')
                         or node.get('resumed_at') or node.get('blocker')):
@@ -122,7 +103,6 @@ def scan(store, now=None):
     now = now or now_local()
     settings = store.settings()
     day, at = now.date().isoformat(), now.isoformat()
-    flags = reminder_flags()
     generated = 0
     with store.connect(write=True) as db:
         # 未发送的旧日任务不补发；已在途消息保留独立结果，不伪造撤回。
@@ -132,14 +112,13 @@ def scan(store, now=None):
         for row in db.execute('SELECT * FROM projects').fetchall():
             project = store.project(row)
             for node in project['milestones']:
-                reasons = [r for r in node_flags(project, node, now, settings) if r in flags]
+                reasons = [r for r in node_flags(project, node, now, settings) if r != 'blocked']
                 if not reasons:
                     continue
                 key = f"{node['id']}:{day}"
                 active_ids.add(key)
-                user = store.user(db, node['owner_id'])
-                valid_owner = user and user['active'] and user['role'] != 'display' and (
-                    group_webhook_configured() or user['wecom_user_id'])
+                user = store.user(db, node['owner_id']) if node.get('owner_id') else None
+                valid_owner = user and user['active'] and user['wecom_user_id'] and user['role'] != 'display'
                 status, detail = ('queued', '') if valid_owner else ('blocked', '负责人未启用或未绑定企微账号')
                 old = db.execute('SELECT * FROM reminders WHERE id=?', (key,)).fetchone()
                 if old and old['status'] in ('accepted', 'sending', 'uncertain'):
@@ -159,46 +138,6 @@ def scan(store, now=None):
         db.execute("UPDATE reminders SET status='uncertain',detail='发送进程中断，需人工核对' "
                    "WHERE status='sending' AND updated_at<?", ((now-timedelta(minutes=10)).isoformat(),))
     return generated
-
-
-def scan_meetings(store, now=None):
-    now = now or now_local()
-    generated = 0
-    with store.connect(write=True) as db:
-        day = now.date().isoformat()
-        for row in db.execute("SELECT * FROM meetings WHERE status='active'").fetchall():
-            start = datetime.fromisoformat(row['start_at'])
-            if start + timedelta(hours=1) <= now:
-                db.execute("UPDATE meetings SET status='completed',updated_at=? WHERE id=?", (now.isoformat(), row['id']))
-                continue
-            if start - timedelta(minutes=30) > now or start <= now:
-                continue
-            key = f"meeting:{row['id']}:{day}"
-            db.execute("INSERT INTO meeting_reminders(id,meeting_id,local_day,status,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
-                       (key, row['id'], day, 'queued' if group_webhook_configured() else 'blocked', now.isoformat()))
-            generated += 1
-    return generated
-
-
-def dispatch_meetings(store, sender=None, now=None):
-    if not group_webhook_configured():
-        return 0
-    sender, now = sender or WeComGroupWebhookSender(), now or now_local()
-    with store.connect() as db:
-        rows = db.execute("SELECT r.*,m.title,m.start_at,m.location,m.notes FROM meeting_reminders r JOIN meetings m ON m.id=r.meeting_id WHERE r.status='queued' AND r.attempts<3 AND r.next_attempt IS NULL ORDER BY m.start_at").fetchall()
-    sent = 0
-    for row in rows:
-        with store.connect(write=True) as db:
-            db.execute("UPDATE meeting_reminders SET status='sending',attempts=attempts+1,updated_at=? WHERE id=?", (now.isoformat(), row['id']))
-        start = datetime.fromisoformat(row['start_at']).astimezone(TZ)
-        content = f"【会议提醒】\n{row['title']}\n开始时间：{start.strftime('%Y-%m-%d %H:%M')}"
-        if row['location']: content += f"\n地点：{row['location']}"
-        if row['notes']: content += f"\n备注：{row['notes']}"
-        status, detail = sender.send(content)
-        with store.connect(write=True) as db:
-            db.execute("UPDATE meeting_reminders SET status=?,detail=?,updated_at=?,next_attempt=? WHERE id=?", (status, detail, now.isoformat(), (now+timedelta(minutes=10)).isoformat(), row['id']))
-        sent += status == 'accepted'
-    return sent
 
 
 class WeComSender:
@@ -243,97 +182,15 @@ class WeComSender:
             return 'uncertain', '发送结果不确定，停止自动重试并请管理员核对'
 
 
-class WeComGroupWebhookSender:
-    @property
-    def configured(self):
-        return group_webhook_configured()
-
-    def send(self, content):
-        if not self.configured:
-            return 'blocked', '企微群机器人未启用或 Webhook 未配置'
-        try:
-            with httpx.Client(timeout=httpx.Timeout(15, connect=5)) as client:
-                response = client.post(os.environ['WECOM_GROUP_WEBHOOK_URL'], json={
-                    'msgtype': 'text', 'text': {'content': content}})
-                response.raise_for_status()
-                result = response.json()
-            if not isinstance(result, dict) or type(result.get('errcode')) is not int:
-                return 'uncertain', '群机器人响应格式异常，需人工核对'
-            if result.get('errcode') != 0:
-                return 'failed', f"群机器人拒绝消息，错误码：{result.get('errcode', 'unknown')}"
-            return 'accepted', '群机器人平台已接受，不代表群成员已读'
-        except (httpx.HTTPError, ValueError):
-            return 'uncertain', '群机器人发送结果不确定，停止自动重试并请管理员核对'
-
-
-def dispatch_group(store, sender=None, now=None):
-    sender, now = sender or WeComGroupWebhookSender(), now or now_local()
-    settings = store.settings()
-    flags = reminder_flags()
-    if not is_workday(now.date(), settings) or now.hour != settings.reminder_hour:
-        return 0
-    with store.connect() as db:
-        rows = db.execute("SELECT * FROM reminders WHERE local_day=? AND status IN ('queued','blocked','failed') "
-                          "AND attempts<3 AND (next_attempt IS NULL OR next_attempt<=?) "
-                          "ORDER BY project_id,milestone_id", (now.date().isoformat(), now.isoformat())).fetchall()
-    pending, batches = [], []
-    for row in rows:
-        with store.connect(write=True) as db:
-            user = store.user(db, row['owner_id'])
-            project = store.project(db.execute('SELECT * FROM projects WHERE id=?', (row['project_id'],)).fetchone())
-        node = next((n for n in project['milestones'] if n['id'] == row['milestone_id']), None) if project else None
-        reasons = [f for f in node_flags(project, node, now, settings) if f in flags] if node else []
-        if not node or not user or not user['active'] or user['role'] == 'display' or not reasons:
-            with store.connect(write=True) as db:
-                db.execute("UPDATE reminders SET status='cancelled',detail='发送前校验已失效',updated_at=? WHERE id=?",
-                           (now.isoformat(), row['id']))
-            continue
-        if not sender.configured:
-            with store.connect(write=True) as db:
-                db.execute("UPDATE reminders SET status='blocked',detail='企微群机器人未配置',updated_at=? WHERE id=?",
-                           (now.isoformat(), row['id']))
-            continue
-        entry = (f"{project['code']} {project['name']} · {node['name']}\n"
-                 f"进度 {node['progress']}%｜截止 {node['due_date']}\n"
-                 + '、'.join(LABELS[r] for r in reasons))
-        if pending and len(('\n\n'.join(item[1] for item in pending+[('' , entry)])).encode('utf-8')) > 1700:
-            batches.append(pending)
-            pending = []
-        pending.append((row['id'], entry))
-    if pending:
-        batches.append(pending)
-    sent = 0
-    for batch in batches[:20]:
-        ids = [item[0] for item in batch]
-        with store.connect(write=True) as db:
-            for key in ids:
-                db.execute("UPDATE reminders SET status='sending',attempts=attempts+1,updated_at=? WHERE id=?",
-                           (now.isoformat(), key))
-        content = '【项目进度提醒】\n\n' + '\n\n'.join(item[1] for item in batch) + '\n\n请更新最新进展、阻碍和下一步安排。'
-        try:
-            status, detail = sender.send(content)
-        except Exception:
-            status, detail = 'uncertain', '群机器人通道异常，发送结果需人工核对'
-        with store.connect(write=True) as db:
-            for key in ids:
-                db.execute('UPDATE reminders SET status=?,detail=?,updated_at=?,next_attempt=? WHERE id=?',
-                           (status, detail, now.isoformat(), (now + timedelta(minutes=10)).isoformat(), key))
-        sent += len(ids) if status == 'accepted' else 0
-    return sent
-
-
 def dispatch(store, sender=None, now=None):
-    if group_webhook_configured():
-        return dispatch_group(store, sender, now)
     sender, now = sender or WeComSender(), now or now_local()
     settings = store.settings()
-    flags = reminder_flags()
-    if not is_workday(now.date(), settings) or now.hour != settings.reminder_hour:
+    if not is_workday(now.date(), settings) or not settings.start_hour <= now.hour < settings.end_hour:
         return 0
     sent, batches = 0, 0
     with store.connect() as db:
         owners = [r['owner_id'] for r in db.execute("SELECT DISTINCT owner_id FROM reminders WHERE local_day=? "
-                    "AND status IN ('queued','blocked','failed') AND attempts<3 "
+                    "AND owner_id IS NOT NULL AND status IN ('queued','blocked','failed') AND attempts<3 "
                     "AND (next_attempt IS NULL OR next_attempt<=?)", (now.date().isoformat(),now.isoformat()))]
     for uid in owners:
         if batches >= 20:
@@ -348,7 +205,7 @@ def dispatch(store, sender=None, now=None):
             for row in rows:
                 project = store.project(db.execute('SELECT * FROM projects WHERE id=?', (row['project_id'],)).fetchone())
                 node = next((n for n in project['milestones'] if n['id'] == row['milestone_id']), None) if project else None
-                reasons = [f for f in node_flags(project,node,now,settings) if f in flags] if node else []
+                reasons = [f for f in node_flags(project,node,now,settings) if f != 'blocked'] if node else []
                 if not node or node['owner_id'] != uid or not reasons:
                     db.execute("UPDATE reminders SET status='cancelled',detail='发送前校验已失效' WHERE id=?", (row['id'],))
                     continue
@@ -401,9 +258,7 @@ def run_cycle(store, sender=None, now=None):
         return {'skipped': True}
     try:
         auto_completed = auto_complete_due(store, now)
-        queued = scan(store, now) + scan_meetings(store, now)
-        accepted = dispatch(store, sender, now) + dispatch_meetings(store, sender, now)
-        return {'auto_completed': auto_completed, 'queued': queued, 'accepted': accepted}
+        return {'auto_completed': auto_completed, 'queued': scan(store, now), 'accepted': dispatch(store, sender, now)}
     finally:
         with store.connect(write=True) as db:
             db.execute('DELETE FROM worker_lease WHERE id=1 AND owner=?', (owner,))

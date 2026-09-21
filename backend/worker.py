@@ -1,21 +1,12 @@
 import argparse
 import logging
-import sys
 import time
 
 from .app.reminders import run_cycle
 from .app.store import Store
 
 
-def _configure_console_encoding():
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, 'reconfigure', None)
-        if reconfigure:
-            reconfigure(encoding='utf-8', errors='replace')
-
-
 def main():
-    _configure_console_encoding()
     parser = argparse.ArgumentParser(description='提醒检查进程；发送必须显式配置并开启')
     parser.add_argument('--once',action='store_true')
     args = parser.parse_args()
@@ -33,3 +24,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

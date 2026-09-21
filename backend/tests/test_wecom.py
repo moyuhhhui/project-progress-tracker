@@ -4,12 +4,20 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.app.models import Action, MessageInput
 from backend.app.ai import parse_message
 from backend.app.service import Service, TZ, BusinessError
 from backend.app.store import Store
 from backend.app.wecom import BotHandler, BotRuntime, read_status, validate_web_url
+
+
+def group_frame(msgid, text):
+    return {'cmd': 'aibot_msg_callback', 'body': {
+        'msgid': msgid, 'aibotid': 'test-bot', 'chatid': 'test-group',
+        'chattype': 'group', 'from': {'userid': 'employee.1'},
+        'msgtype': 'text', 'text': {'content': text}}}
 
 
 class WeComTests(unittest.TestCase):
@@ -45,42 +53,54 @@ class WeComTests(unittest.TestCase):
         with self.store.connect() as db:
             return [dict(r) for r in db.execute('SELECT * FROM drafts')]
 
-    def test_query_reply_contains_project_and_milestone_status(self):
-        reply = self.handler.format_query_reply([{
-            'name': '仓储系统升级', 'code': 'P0001', 'status': 'active', 'owner_name': '柯金成',
-            'progress': 40, 'due_date': '2026-10-30', 'flags': ['blocked'],
-            'milestones': [{'name': '方案设计', 'status': 'paused', 'progress': 20,
-                            'owner_name': '朱浩', 'due_date': '2026-09-30',
-                            'blocker': '等待确认', 'next_step': '补充方案'}],
-        }])
-        self.assertIn('项目状态：仓储系统升级', reply)
-        self.assertIn('整体状态：进行中', reply)
-        self.assertIn('当前风险：有阻碍', reply)
-        self.assertIn('方案设计：已暂停，进度 20%', reply)
-        self.assertIn('阻碍：等待确认', reply)
+    def test_complete_group_message_returns_saved_summary_without_legacy_link(self):
+        result = {'kind': 'saved', 'result': {'project_id': '1', 'code': 'P0001',
+                  'operation_id': 'op-1', 'version': 1, 'message': '已保存'}}
+        handler = BotHandler(self.service, 'test-bot', 'https://tracker.example')
+        with patch('backend.app.wecom.ai.parse_message', return_value=result):
+            reply = asyncio.run(handler.handle(group_frame('wecom-direct-001', '新建项目')))
+        self.assertIn('成功保存 1 项', reply)
+        self.assertNotIn('#draft=', reply)
+        self.assertNotIn('补充 ', reply)
 
-    def legacy_group_draft(self):
-        from backend.app.ai import save_incomplete
-        draft = save_incomplete(self.service, self.admin, Action(intent='create_project'),
-                                '创建项目', {'missing_fields': ['name']})
-        with self.store.connect(write=True) as db:
-            db.execute('INSERT INTO wecom_drafts VALUES(?,?,?,?)',
-                       (draft['id'], 'bot-1', 'group-1', self.admin['id']))
-        return draft['id']
+    def test_incomplete_group_message_lists_missing_fields_without_writing_link(self):
+        result = {'kind': 'needs_input', 'missing_fields': ['project_name'],
+                  'ambiguities': [], 'message': '请补充所属项目名称'}
+        handler = BotHandler(self.service, 'test-bot', 'https://tracker.example')
+        with patch('backend.app.wecom.ai.parse_message', return_value=result):
+            reply = asyncio.run(handler.handle(group_frame('wecom-missing-001', '明天调研')))
+        self.assertIn('请补充所属项目名称', reply)
+        self.assertNotIn('#draft=', reply)
 
-    def test_complete_message_saves_without_confirmation_and_returns_detail_link(self):
+    def test_batch_reply_counts_actions_not_projects_or_model_attempts(self):
+        result = {'kind': 'batch', 'results': [{}, {}],
+                  'failures': [{'project_name': '第三项', 'message': '保存失败'}],
+                  'recognized_actions': 3, 'saved_actions': 2, 'business_failures': 1,
+                  'model_retries': 99}
+        handler = BotHandler(self.service, 'test-bot', 'https://tracker.example')
+        with patch('backend.app.wecom.ai.parse_message', return_value=result):
+            reply = asyncio.run(handler.handle(group_frame('wecom-batch-001', '批量安排')))
+        self.assertIn('已识别 3 项安排，成功保存 2 项，失败 1 项。', reply)
+        self.assertNotIn('个项目', reply)
+        self.assertNotIn('99', reply)
+
+    def test_ignored_message_returns_ai_result_message(self):
+        result = {'kind': 'ignored', 'message': '这不是项目安排，未修改数据。'}
+        handler = BotHandler(self.service, 'test-bot', 'https://tracker.example')
+        with patch('backend.app.wecom.ai.parse_message', return_value=result):
+            reply = asyncio.run(handler.handle(group_frame('wecom-ignored-001', '天气不错')))
+        self.assertEqual(reply, result['message'])
+
+    def test_complete_message_saves_and_returns_direct_summary(self):
         reply = self.handle()
-        draft = self.drafts()[0]
         self.assertEqual(len(self.service.projects(self.admin, display=True)), 1)
-        self.assertEqual(draft['status'], 'confirmed')
+        self.assertEqual(self.drafts(), [])
         self.assertIn('https://tracker.example/#projects', reply)
         self.assertNotIn('草稿', reply)
         self.assertNotIn('保密项目', reply)
         self.assertNotIn(self.admin['access_key'], reply)
-        self.assertIn('已自动保存', reply)
+        self.assertIn('成功保存 1 项', reply)
         self.assertNotIn('登录', reply)
-        self.service.confirm(self.admin, draft['id'])
-        self.assertEqual(len(self.service.projects(self.admin)), 1)
 
     def test_group_reply_summarizes_batch_results(self):
         calls = [
@@ -90,43 +110,38 @@ class WeComTests(unittest.TestCase):
 
         reply = self.handle(parser=lambda _: calls)
 
-        self.assertIn('已处理 2 个项目', reply)
+        self.assertIn('已识别 2 项安排', reply)
         self.assertIn('成功保存 2 项', reply)
+        self.assertIn('失败 0 项', reply)
         self.assertIn('https://tracker.example/#projects', reply)
+        self.assertNotIn('个项目', reply)
         self.assertNotIn('批量项目甲', reply)
 
     def test_redelivery_after_restart_deduplicates_and_tracks_current_status(self):
-        self.handle()
-        did = self.drafts()[0]['id']
-        self.service.confirm(self.admin, did)
+        first_reply = self.handle()
         self.handler = BotHandler(Service(Store(self.store.path), lambda: self.at), 'bot-1', 'https://tracker.example')
         reply = self.handle()
         self.assertEqual(self.calls, 1)
-        self.assertEqual(len(self.drafts()), 1)
-        self.assertIn('已自动保存', reply)
+        self.assertEqual(self.drafts(), [])
+        self.assertEqual(len(self.service.projects(self.admin)), 1)
+        self.assertEqual(reply, first_reply)
+        self.assertIn('成功保存 1 项', reply)
 
     def test_missing_project_and_fields_do_not_create_fallback_project(self):
         raw = '下周安排调研，负责人之后再定。' * 180
         parser = lambda _: json.dumps({'intent': 'record_item', 'data': {},
                                       'missing_fields': ['text'], 'ambiguities': ['所属项目不明确']})
         reply = self.handle(self.frame(text=raw), parser)
-        self.assertIn('无法处理', reply)
+        self.assertIn('请补充', reply)
+        self.assertIn('未保存任何项目或事项', reply)
         self.handle(self.frame(text=raw), parser)
         self.assertEqual(self.service.projects(self.admin, display=True), [])
         self.assertEqual(self.drafts(), [])
 
-    def test_rephrased_create_prefix_does_not_duplicate_group_arrangement(self):
-        parser = lambda _: json.dumps({'intent': 'record_item', 'data': {
-            'project_name': '锐瀚科技', 'text': '去工厂调研', 'due_date': '2026-09-08'}})
-        self.handle(self.frame(text='锐瀚科技，下周二去工厂调研@1'), parser)
-        self.handle(self.frame(text='新建项目，锐瀚科技，下周二去工厂调研@1', msgid='second-message'), parser)
-        self.assertEqual(len(self.service.projects(self.admin)[0]['milestones']), 1)
-
-    def test_wrong_candidate_id_does_not_discard_parsed_dates(self):
+    def test_group_record_keeps_multiple_parsed_dates(self):
         self.handle()
-        wrong = self.service.projects(self.admin)[0]
         self.handle(self.frame(text='锐瀚科技，下周二周三调研', msgid='new-company'), lambda _: json.dumps({
-            'intent': 'record_item', 'project_id': wrong['id'], 'data': {
+            'intent': 'record_item', 'data': {
                 'project_name': '锐瀚科技', 'text': '下周二周三调研', 'items': [
                     {'text': '周二调研', 'due_date': '2026-09-08'},
                     {'text': '周三调研', 'due_date': '2026-09-09'}]}}))
@@ -134,11 +149,12 @@ class WeComTests(unittest.TestCase):
         self.assertEqual([n['due_date'] for n in project['milestones']], ['2026-09-08', '2026-09-09'])
 
     def test_shared_owner_names_and_roles_remain_readable_without_accounts(self):
-        from backend.app.ai import save_group_message
         self.service.internal_shared = True
-        draft = save_group_message(self.service, self.admin, Action(intent='create_project', data={
-            'name': '锐瀚科技', 'owner_roles': {'张毅': 'A1', '朱浩': 'A2'}}), '锐瀚科技负责人张毅a1朱浩a2', {})
-        self.assertEqual(draft['status'], 'confirmed')
+        reply = self.handle(parser=lambda _: json.dumps({'intent': 'create_project', 'data': {
+            'name': '锐瀚科技', 'owner_assignments': [
+                {'name': '张毅', 'role': 'A1', 'primary': True},
+                {'name': '朱浩', 'role': 'A2', 'primary': False}]}}))
+        self.assertIn('成功保存 1 项', reply)
         self.assertEqual(self.service.projects(self.admin)[0]['owner_name'], '张毅（A1）、朱浩（A2）')
 
     def test_ambiguous_update_keeps_original_state_without_fallback_item(self):
@@ -148,33 +164,36 @@ class WeComTests(unittest.TestCase):
         reply = self.handle(self.frame(text=raw, msgid='ambiguous'), lambda _: json.dumps({
             'intent': 'milestone_status', 'project_id': project['id'],
             'data': {'status': 'completed'}, 'ambiguities': ['不知道哪个节点']}))
-        self.assertIn('无法处理', reply)
+        self.assertIn('请明确', reply)
+        self.assertIn('未保存任何项目或事项', reply)
         saved = self.service.projects(self.admin, display=True)[0]
         self.assertEqual(saved['milestones'][0]['status'], project['milestones'][0]['status'])
         self.assertEqual(len(saved['milestones']), len(project['milestones']))
 
-    def test_group_record_keeps_multiple_items_and_uncertain_time_without_draft(self):
+    def test_group_record_with_ambiguous_time_requests_a_new_complete_message(self):
         reply = self.handle(parser=lambda _: json.dumps({'intent': 'record_item', 'data': {
             'project_name': '调研项目', 'text': '下周调研，随后出方案', 'items': [
                 {'text': '调研', 'time_text': '下周'}, {'text': '出方案', 'time_text': '随后'}]},
             'ambiguities': ['具体日期不明确']}))
-        self.assertIn('已自动保存', reply)
-        nodes = self.service.projects(self.admin, display=True)[0]['milestones']
-        self.assertEqual([n['time_text'] for n in nodes], ['下周', '随后'])
-        self.assertEqual([n['due_date'] for n in nodes], [None, None])
+        self.assertIn('请明确', reply)
+        self.assertIn('未保存任何项目或事项', reply)
+        self.assertEqual(self.drafts(), [])
+        self.assertEqual(self.service.projects(self.admin, display=True), [])
 
     def test_message_for_closed_project_is_rejected_without_fallback_project(self):
         self.handle()
         project = self.service.projects(self.admin)[0]
         self.service.create_draft(self.admin, Action(intent='project_status', project_id=project['id'],
             data={'status': 'completed', 'reason': '完成'}), auto_save=True)
+        draft_count = len(self.drafts())
         reply = self.handle(self.frame(text='再安排一次交流', msgid='closed-project'), lambda _: json.dumps({
             'intent': 'record_item', 'project_id': project['id'], 'data': {'text': '再安排一次交流'}}))
-        self.assertIn('无法处理', reply)
+        self.assertIn('失败 1 项', reply)
+        self.assertIn('未保存任何项目或事项', reply)
         projects = self.service.projects(self.admin, display=True)
         self.assertEqual(len(projects), 1)
         self.assertEqual(next(p for p in projects if p['id'] == project['id'])['status'], 'completed')
-        self.assertTrue(all(d['status'] == 'confirmed' for d in self.drafts()))
+        self.assertEqual(len(self.drafts()), draft_count)
 
     def test_group_contact_fields_save_as_text_without_exposing_them_in_reply(self):
         contacts = {'contact_company': '合作公司', 'contact_name': '外部联系人', 'contact_info': '微信：partner-test'}
@@ -212,22 +231,14 @@ class WeComTests(unittest.TestCase):
         self.assertEqual(self.calls, 0)
         self.assertEqual(self.drafts(), [])
 
-    def test_followup_is_bound_to_sender_and_original_group(self):
-        did = self.legacy_group_draft()
-        for changes in ({'chatid': 'another-group'}, {'userid': 'employee.2'}):
-            reply = self.handle(self.frame(text=f'补充 {did} 日期完整', msgid='follow-denied', **changes))
-            self.assertIn('无法', reply)
-        self.assertEqual(self.calls, 0)
-        self.handle(self.frame(text=f'补充 {did} 日期完整', msgid='follow-allowed'))
-        self.assertEqual(self.calls, 1)
-        self.assertEqual(self.service.draft(self.admin, did)['status'], 'cancelled')
-        self.assertEqual(len(self.drafts()), 2)
-
-    def test_web_draft_cannot_be_used_as_group_followup(self):
-        result = asyncio.run(parse_message(self.service, self.admin,
-            MessageInput(text='创建', client_message_id='web-message'), self.parser))
-        self.handle(self.frame(text='补充 ' + result['draft']['id'] + ' 日期', msgid='follow-web'))
-        self.assertEqual(self.calls, 1)
+    def test_followup_shaped_text_is_parsed_as_a_new_message(self):
+        seen = []
+        def parser(prompt):
+            seen.append(prompt)
+            return json.dumps({'intent': 'ignore'})
+        reply = self.handle(self.frame(text='补充 abcdefabcdefabcdefabcdef 日期完整', msgid='new-message'), parser)
+        self.assertIn('补充 abcdefabcdefabcdefabcdef 日期完整', seen[0])
+        self.assertIn('未识别到明确的项目操作', reply)
 
     def test_duplicate_does_not_consume_rate_limit_but_new_messages_do(self):
         def incomplete(_):
@@ -247,7 +258,6 @@ class WeComTests(unittest.TestCase):
         self.assertNotIn('secret-key', reply)
         self.assertIn('失败', reply)
         self.handle(self.frame(msgid='create'))
-        self.service.confirm(self.admin, self.drafts()[0]['id'])
         reply = self.handle(self.frame(msgid='query'), lambda _: '{"intent":"query"}')
         self.assertIn('https://tracker.example/', reply)
         self.assertNotIn('保密项目', reply)
@@ -262,7 +272,6 @@ class WeComTests(unittest.TestCase):
 
     def test_revoked_project_access_rejects_cached_preview(self):
         self.handle()
-        self.service.confirm(self.admin, self.drafts()[0]['id'])
         project = self.service.projects(self.admin)[0]
         with self.store.connect(write=True) as db:
             db.execute("UPDATE users SET role='member' WHERE id=?", (self.admin['id'],))
@@ -295,24 +304,24 @@ class WeComTests(unittest.TestCase):
     def test_public_url_must_not_contain_credentials_or_query(self):
         for url in ('', 'javascript:alert(1)', 'https://user:password@example.com',
                     'https://example.com/?token=secret', 'https://example.com/#display',
-                    'https://example.com/\n'):
+                    'https://example.com/subpath', 'https://example.com/\n'):
             with self.assertRaises(BusinessError):
                 validate_web_url(url)
         self.assertEqual(validate_web_url('https://tracker.example/'), 'https://tracker.example')
-        self.assertEqual(validate_web_url('https://tracker.example/subpath/'), 'https://tracker.example/subpath')
 
     def test_web_and_wecom_message_ids_do_not_collide(self):
         request = MessageInput(text='创建', client_message_id='same-message-key')
-        asyncio.run(parse_message(self.service, self.admin, request, self.parser))
-        with self.assertRaises(BusinessError):
-            asyncio.run(parse_message(self.service, self.admin, request, self.parser, channel='wecom'))
+        web = asyncio.run(parse_message(self.service, self.admin, request, self.parser))
+        wecom = asyncio.run(parse_message(self.service, self.admin, request, self.parser, channel='wecom'))
+        self.assertEqual(web['kind'], 'saved')
+        self.assertEqual(wecom['kind'], 'saved')
         with self.store.connect() as db:
             ids = {row['id'] for row in db.execute('SELECT id FROM messages')}
         self.assertEqual(ids, {
             'web:' + self.admin['id'] + ':same-message-key',
             'wecom:' + self.admin['id'] + ':same-message-key',
         })
-        self.assertEqual(len(self.drafts()), 1)
+        self.assertEqual(self.drafts(), [])
 
     def test_pairing_command_is_retired_without_invoking_model(self):
         reply = self.handle(self.frame(text='绑定 dead-code', userid='employee.1'))
@@ -325,14 +334,19 @@ class WeComTests(unittest.TestCase):
         self.assertEqual(self.calls, 0)
         self.assertIn('无需确认', reply)
 
-    def test_mentioned_followup_uses_existing_draft(self):
-        did = self.legacy_group_draft()
-        self.handle(self.frame(text=f'@项目机器人\u2005补充 {did} 日期完整', msgid='mentioned-followup'))
-        self.assertEqual(self.service.draft(self.admin, did)['status'], 'cancelled')
+    def test_mentioned_followup_shaped_text_is_parsed_as_a_new_message(self):
+        seen = []
+        def parser(prompt):
+            seen.append(prompt)
+            return json.dumps({'intent': 'ignore'})
+        self.handle(self.frame(text='@项目机器人\u2005补充 abcdefabcdefabcdefabcdef 日期完整',
+                               msgid='mentioned-followup'), parser)
+        self.assertIn('补充 abcdefabcdefabcdefabcdef 日期完整', seen[0])
 
     def test_group_reply_reports_recognized_intent_without_project_details(self):
         reply = self.handle()
-        self.assertIn('已自动保存', reply)
+        self.assertIn('已识别 1 项安排', reply)
+        self.assertIn('成功保存 1 项', reply)
         self.assertNotIn('保密项目', reply)
 
     def test_sdk_worker_registers_callbacks_replies_and_closes_cleanly(self):
@@ -393,3 +407,4 @@ class WeComTests(unittest.TestCase):
             asyncio.run(run_bot(self.service, 'bot-1', 'https://tracker.example', client))
         self.assertTrue(client.disconnected)
         self.assertEqual(read_status(self.service)['wecom_inbound'], 'stopped')
+

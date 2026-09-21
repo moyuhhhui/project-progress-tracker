@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
 
-test('工作台定时同步草稿和项目，隐藏时暂停，恢复时同步，卸载时清理', async () => {
+test('工作台定时同步项目，隐藏时暂停，恢复时同步，卸载时清理', async () => {
   const source = readFileSync(new URL('../src/views/Workspace.vue', import.meta.url), 'utf8')
     .match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   let mounted, unmounted, tick, period, cleared, reads = 0, version = 1
@@ -27,35 +27,33 @@ test('工作台定时同步草稿和项目，隐藏时暂停，恢复时同步�
       if (name === '../api') return { api: async path => {
         reads++
         if (path === '/api/projects') return { projects: [{ version }], at: String(version) }
-        if (path === '/api/drafts') return [{ id: 'draft', status: version === 1 ? 'needs_input' : 'confirmed' }]
+        if (path === '/api/users') return []
+        if (path === '/api/status') return {}
         return []
       } }
       if (name === '../domain') return { errorText: String }
       return {}
     },
   })
-  vm.runInContext(ts.transpileModule(source + '\n globalThis.state = { projects, drafts, selectedDraft, loading };', {
+  vm.runInContext(ts.transpileModule(source + '\n globalThis.state = { projects, loading };', {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, context)
   await mounted()
   assert.equal(period, 5000)
-  context.state.selectedDraft.value = context.state.drafts.value[0]
   version = 2
   tick()
   tick() // 请求未结束时不重叠发起。
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(reads, 10)
+  assert.equal(reads, 6)
   assert.equal(context.state.projects.value[0].version, 2)
-  assert.equal(context.state.drafts.value[0].status, 'confirmed')
-  assert.equal(context.state.selectedDraft.value.status, 'confirmed')
   assert.equal(context.state.loading.value, false)
   document.visibilityState = 'hidden'
   tick()
-  assert.equal(reads, 10)
+  assert.equal(reads, 6)
   document.visibilityState = 'visible'
   listeners.get('document:visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(reads, 15)
+  assert.equal(reads, 9)
   unmounted()
   assert.equal(cleared, 1)
   assert.equal(listeners.size, 0)

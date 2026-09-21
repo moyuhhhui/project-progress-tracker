@@ -1,8 +1,8 @@
 """智能机器人群消息适配；解析后直接保存并展示。"""
 import hashlib
-import ipaddress
 import re
 import secrets
+import os
 from datetime import timedelta
 from urllib.parse import urlsplit
 
@@ -12,31 +12,16 @@ from .service import BusinessError, require
 from .store import encode
 
 
-STATE_LABELS = {
-    'not_started': '未开始', 'active': '进行中', 'paused': '已暂停',
-    'completed': '已完成', 'cancelled': '已取消',
-}
-FLAG_LABELS = {'overdue': '逾期', 'stale': '待更新', 'due_soon': '临期', 'blocked': '有阻碍'}
-
-
 def validate_web_url(value):
     try:
         url = urlsplit(value)
-        hostname = (url.hostname or '').rstrip('.').lower()
-        is_loopback = hostname == 'localhost'
-        if not is_loopback:
-            try:
-                is_loopback = ipaddress.ip_address(hostname).is_loopback
-            except ValueError:
-                pass
         valid = (url.scheme in ('http', 'https') and url.hostname and url.port != 0
-                 and not is_loopback
                  and not url.username and not url.password and not url.query and not url.fragment
-                 and url.path.startswith('/') and not any(c.isspace() for c in value)
+                 and url.path in ('', '/') and not any(c.isspace() for c in value)
                  and not any(c in value for c in '[]()<>\\'))
     except ValueError:
         valid = False
-    require(valid, 'TRACKER_WEB_URL 须为员工可访问的 http(s) 地址，不含账号、查询参数或片段')
+    require(valid, 'TRACKER_WEB_URL 须为员工可访问的 http(s) 根地址，不含账号、查询参数或片段')
     return value.rstrip('/')
 
 
@@ -44,6 +29,7 @@ class BotHandler:
     def __init__(self, service, bot_id, web_url):
         self.service, self.bot_id = service, bot_id
         self.web_url = validate_web_url(web_url)
+        self.allowed_chat_ids = {item.strip() for item in os.getenv('TRACKER_WECOM_ALLOWED_CHAT_IDS', '').split(',') if item.strip()}
 
     def actor(self, userid):
         if self.service.internal_shared:
@@ -56,47 +42,6 @@ class BotHandler:
             require(row, '请管理员在成员管理中配置你的企业微信成员 ID，并启用普通成员账号。', 403)
             return self.service.fresh_user(db, self.service.store.user(db, row['id']))
 
-    @staticmethod
-    def format_query_reply(projects):
-        """把查询结果整理成可直接发到企业微信群的状态摘要。"""
-        if not projects:
-            return '未找到可访问的项目。'
-        blocks = []
-        for project in projects[:10]:
-            status = STATE_LABELS.get(project.get('status'), project.get('status') or '未知')
-            progress = project.get('progress')
-            progress_text = '—' if progress is None else f'{progress}%'
-            owner = project.get('owner_name') or '待明确'
-            lines = [
-                f"项目状态：{project.get('name') or '未命名项目'}",
-                f"项目编号：{project.get('code') or '—'}",
-                f"整体状态：{status}",
-                f"项目负责人：{owner}",
-                f"项目进度：{progress_text}",
-                f"计划截止：{project.get('due_date') or '未设置'}",
-            ]
-            flags = [FLAG_LABELS.get(flag, flag) for flag in (project.get('flags') or [])]
-            if flags:
-                lines.append('当前风险：' + '、'.join(flags))
-            milestones = project.get('milestones') or []
-            if milestones:
-                lines.append('节点进度：')
-                for index, node in enumerate(milestones[:20], 1):
-                    node_status = STATE_LABELS.get(node.get('status'), node.get('status') or '未知')
-                    node_progress = node.get('progress')
-                    node_progress_text = '—' if node_progress is None else f'{node_progress}%'
-                    due = node.get('due_date') or '未设置'
-                    owner_name = node.get('owner_name') or '待明确'
-                    lines.append(f"{index}. {node.get('name') or '未命名节点'}：{node_status}，进度 {node_progress_text}，负责人 {owner_name}，截止 {due}")
-                    if node.get('blocker'):
-                        lines.append(f"   阻碍：{node['blocker']}")
-                    if node.get('next_step'):
-                        lines.append(f"   下一步：{node['next_step']}")
-            blocks.append('\n'.join(lines))
-        if len(projects) > 10:
-            blocks.append(f"其余 {len(projects) - 10} 个项目请打开工作台查看。")
-        return '\n\n'.join(blocks)
-
     async def handle(self, frame, parser=None):
         body = frame.get('body') if isinstance(frame, dict) else None
         if not isinstance(body, dict) or frame.get('cmd') != 'aibot_msg_callback':
@@ -107,6 +52,8 @@ class BotHandler:
         msgid, chatid, userid = body.get('msgid'), body.get('chatid'), sender.get('userid')
         if (body.get('aibotid') != self.bot_id or body.get('chattype') != 'group'
                 or not all(isinstance(v, str) and 0 < len(v) <= 300 for v in (msgid, chatid, userid))):
+            return None
+        if self.allowed_chat_ids and chatid not in self.allowed_chat_ids:
             return None
         text_body = body.get('text')
         text = text_body.get('content') if isinstance(text_body, dict) else None
@@ -126,62 +73,38 @@ class BotHandler:
         text = text.strip()
         if re.match(r'^(确认|取消|帮助)(?:\s|$)', text):
             return f'无需确认。项目消息解析后直接保存并上大屏，需要修改请打开工作台：{self.web_url}/#projects'
-        previous = None
-        if text.startswith('补充'):
-            match = re.fullmatch(r'补充\s+([0-9a-f]{24})\s+(.+)', text, re.DOTALL)
-            if not match:
-                return '补充格式：@机器人 补充 草稿完整编号 补充说明。编号可从草稿链接中复制。'
-            previous, text = match.groups()
         key = hashlib.sha256(encode([self.bot_id, chatid, userid, msgid]).encode()).hexdigest()
         try:
             with self.service.store.connect() as db:
-                if previous and not self.service.internal_shared:
-                    bound = db.execute('SELECT 1 FROM wecom_drafts WHERE draft_id=? AND bot_id=? AND chat_id=? AND user_id=?',
-                                       (previous, self.bot_id, chatid, actor['id'])).fetchone()
-                    require(bound, '无法补充此草稿；请使用本人在当前群发起的草稿。', 404)
                 duplicate = db.execute('SELECT 1 FROM messages WHERE id=?', ('wecom:' + actor['id'] + ':' + key,)).fetchone()
                 count = db.execute('SELECT count(*) FROM messages WHERE user_id=? AND created_at>?',
                                    (actor['id'], (self.service.clock() - timedelta(minutes=1)).isoformat())).fetchone()[0]
                 require(duplicate or count < 10, '提交过于频繁，请一分钟后再试。', 429)
             result = await ai.parse_message(self.service, actor,
-                MessageInput(text=text, client_message_id=key, previous_draft_id=previous), parser, channel='wecom')
-            # 模型调用期间可能停用或重新绑定成员；不得向旧身份返回草稿入口。
+                MessageInput(text=text, client_message_id=key), parser, channel='wecom')
+            # 模型调用期间可能停用或重新绑定成员；不得向旧身份返回处理结果。
             if not self.service.internal_shared:
                 require(self.actor(userid)['id'] == actor['id'], '账号绑定已变化', 403)
-            if result['kind'] == 'draft':
-                draft = self.service.draft(actor, result['draft']['id'])
-                if draft['status'] == 'confirmed':
-                    return f'已自动保存，可在大屏查看；需要调整请在前端修改：{self.web_url}/#projects'
-                with self.service.store.connect(write=True) as db:
-                    db.execute('INSERT OR IGNORE INTO wecom_drafts VALUES(?,?,?,?)',
-                               (draft['id'], self.bot_id, chatid, actor['id']))
-                labels = {'pending': '草稿待处理，请补充或重新提交', 'needs_input': '草稿需要补充信息，暂不上大屏',
-                          'confirmed': '信息齐全，已自动保存', 'cancelled': '草稿已取消', 'expired': '草稿已过期'}
-                intents = {'record_item': '记录项目事项', 'create_project': '创建项目', 'edit_project': '修改项目', 'add_milestone': '新增目标节点',
-                           'edit_milestone': '修改目标节点', 'report_progress': '汇报进度',
-                           'project_status': '更新项目状态', 'milestone_status': '更新目标状态'}
-                reply = (f"已识别：{intents[draft['action']['intent']]}。{labels[draft['status']]}。查看详情：\n"
-                         f"{self.web_url}/#draft={draft['id']}")
-                if draft['status'] in ('pending', 'needs_input'):
-                    reply += '\n在本群 @机器人发送：补充 草稿完整编号 补充说明。'
-                return reply
+            if result['kind'] == 'saved':
+                return f'已识别 1 项安排，成功保存 1 项，失败 0 项。工作台：{self.web_url}/#projects'
+            if result['kind'] == 'needs_input':
+                return result['message'] + '；未保存任何项目或事项。请补充后重新 @机器人发送。'
             if result['kind'] == 'batch':
-                total, succeeded, failed = result['total'], result['succeeded'], result['failed']
-                if succeeded and not failed:
-                    return (f'已处理 {total} 个项目，成功保存 {succeeded} 项。'
-                            f'可在工作台查看：{self.web_url}/#projects')
-                if succeeded:
-                    reply = f'已处理 {total} 个项目：成功 {succeeded} 项，失败 {failed} 项。'
-                    reply += f'已保存内容可在工作台查看：{self.web_url}/#projects'
-                else:
-                    reply = f'已处理 {total} 个项目：成功 0 项，失败 {failed} 项；未保存任何项目。'
+                total = result['recognized_actions']
+                succeeded = result['saved_actions']
+                failed = result['business_failures']
+                reply = f'已识别 {total} 项安排，成功保存 {succeeded} 项，失败 {failed} 项。'
+                reply += (f'工作台：{self.web_url}/#projects' if succeeded else
+                          '未保存任何项目或事项。')
                 if result.get('failures'):
                     reply += '\n' + '\n'.join(
                         f"- {item['project_name']}：{item['message']}"
                         for item in result['failures'])
                 return reply
             if result['kind'] == 'query':
-                return self.format_query_reply(result.get('projects') or []) + f'\n\n工作台：{self.web_url}/#projects'
+                return f'请打开工作台查看项目：{self.web_url}/#projects'
+            if result['kind'] == 'ignored':
+                return result['message']
             return '未识别到明确的项目操作，未修改数据。'
         except BusinessError as exc:
             if exc.status == 429:
@@ -228,7 +151,7 @@ def read_status(service):
     if row and phase != 'stopped' and row['expires_at'] <= service.clock().isoformat():
         phase = 'offline'
     labels = {'not_started': '企业微信接收进程尚未启动', 'connecting': '正在连接企业微信',
-              'authenticated': '企业微信长连接已认证，等待群内 @消息；真实业务闭环仍需验收',
+              'authenticated': '企业微信长连接已认证，等待白名单群内 @消息',
               'disconnected': '企业微信连接已断开，正在重连', 'error': '企业微信连接或回复异常，请检查接收进程',
               'offline': '企业微信接收进程心跳已过期', 'stopped': '企业微信接收进程已停止'}
     return {'wecom_inbound': phase, 'message': labels.get(phase, '企业微信接收状态待检查')}

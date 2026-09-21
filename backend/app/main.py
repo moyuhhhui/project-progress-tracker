@@ -11,8 +11,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from . import ai
-from .models import Action, MessageInput, UserCreate, UserPatch, ReminderSettings
-from .reminders import scan, scan_meetings
+from .models import Action, ExecuteActionRequest, MessageInput, UserCreate, UserPatch, ReminderSettings
+from .reminders import scan
 from .service import BusinessError, Service, require, manager, all_access
 from .store import Store, encode, token_hash
 from .wecom import read_status
@@ -85,10 +85,15 @@ def create_app(db_path=None):
     def meetings(actor=Depends(editor)):
         return {'meetings': service.meetings(actor), 'at': service.clock().isoformat()}
 
+    @app.post('/api/actions')
+    def execute_action(body: ExecuteActionRequest, actor=Depends(editor)):
+        return service.execute_action(actor, body, source='web')
+
     @app.get('/api/display')
     def display(actor=Depends(user)):
-        # 大屏与工作台共用同一份数据快照，不再单独按管理员/普通账号切换口径。
-        return {'projects':service.projects(actor), 'meetings': service.meetings(actor), 'at':service.clock().isoformat()}
+        require(all_access(actor) or actor['role'] == 'display', '需要独立大屏账号',403)
+        return {'projects':service.projects(actor,display=True), 'meetings': service.meetings(actor, display=True),
+                'at':service.clock().isoformat()}
 
     @app.post('/api/drafts')
     def draft(action: Action, actor=Depends(editor)):
@@ -211,7 +216,7 @@ def create_app(db_path=None):
 
     @app.post('/api/reminders/scan')
     def scan_reminders(actor=Depends(admin)):
-        return {'count': scan(store) + scan_meetings(store), 'message':'已检查并更新提醒队列；此操作不发送外部消息'}
+        return {'count':scan(store),'message':'已检查并更新提醒队列；此操作不发送外部消息'}
 
     @app.post('/api/reminders/{reminder_id}/resolve')
     def resolve_reminder(reminder_id: str, actor=Depends(admin)):

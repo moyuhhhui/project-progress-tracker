@@ -2,18 +2,19 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { dateTime, errorText } from '../domain'
-import type { Actor, Draft, Project, User, Snapshot, IntegrationStatus, Meeting } from '../types'
+import type { Actor, Project, User, Snapshot, IntegrationStatus } from '../types'
 import ProjectsPage from './ProjectsPage.vue'
+import DraftsPage from './DraftsPage.vue'
 import RemindersPage from './RemindersPage.vue'
 import AdminPage from './AdminPage.vue'
 import FullscreenButton from '../components/FullscreenButton.vue'
 
 const props = defineProps<{ actor: Actor }>()
 const section = ref('projects')
-const projects = ref<Project[]>([]), users = ref<User[]>([]), drafts = ref<Draft[]>([]), meetings = ref<Meeting[]>([])
-const status = ref<IntegrationStatus | null>(null), snapshotAt = ref(''), selectedDraft = ref<Draft | null>(null)
+const projects = ref<Project[]>([]), users = ref<User[]>([])
+const status = ref<IntegrationStatus | null>(null), snapshotAt = ref('')
 const loading = ref(false), error = ref('')
-const titles: Record<string, string> = { projects: '项目进度', reminders: '提醒记录', admin: '成员与设置' }
+const titles: Record<string, string> = { projects: '项目进度', assistant: '项目助手', reminders: '提醒记录', admin: '成员与设置' }
 let refreshing = false
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 async function refresh(silent = false) {
@@ -21,17 +22,12 @@ async function refresh(silent = false) {
   refreshing = true
   loading.value = !silent; error.value = ''
   const results = await Promise.allSettled([
-    api<Snapshot>('/api/projects'), api<User[]>('/api/users'), api<Draft[]>('/api/drafts'), api<IntegrationStatus>('/api/status'), api<{ meetings: Meeting[] }>('/api/meetings'),
+    api<Snapshot>('/api/projects'), api<User[]>('/api/users'), api<IntegrationStatus>('/api/status'),
   ])
-  const [p, u, d, s, m] = results
+  const [p, u, s] = results
   if (p.status === 'fulfilled') { projects.value = p.value.projects; snapshotAt.value = p.value.at }
   if (u.status === 'fulfilled') users.value = u.value
-  if (d.status === 'fulfilled') {
-    drafts.value = d.value
-    if (selectedDraft.value) selectedDraft.value = d.value.find(draft => draft.id === selectedDraft.value?.id) || selectedDraft.value
-  }
   if (s.status === 'fulfilled') status.value = s.value
-  if (m.status === 'fulfilled') meetings.value = m.value.meetings
   error.value = results.filter(r => r.status === 'rejected').map(r => errorText(r.reason)).join('；')
   loading.value = false
   refreshing = false
@@ -39,23 +35,22 @@ async function refresh(silent = false) {
 function refreshVisible() {
   if (document.visibilityState === 'visible') void refresh(true)
 }
-function openLinkedSection() {
+async function openLinkedDraft() {
   const hash = window.location.hash
   if (hash === '#projects') section.value = 'projects'
-  if (hash === '#reminders') section.value = 'reminders'
-  if (hash === '#admin') section.value = 'admin'
+  if (hash === '#assistant' || hash === '#drafts') section.value = 'assistant'
 }
 onMounted(async () => {
-  window.addEventListener('hashchange', openLinkedSection)
+  window.addEventListener('hashchange', openLinkedDraft)
   window.addEventListener('focus', refreshVisible)
   document.addEventListener('visibilitychange', refreshVisible)
   refreshTimer = setInterval(refreshVisible, 5_000)
   await refresh()
-  openLinkedSection()
+  await openLinkedDraft()
 })
 onBeforeUnmount(() => {
   clearInterval(refreshTimer)
-  window.removeEventListener('hashchange', openLinkedSection)
+  window.removeEventListener('hashchange', openLinkedDraft)
   window.removeEventListener('focus', refreshVisible)
   document.removeEventListener('visibilitychange', refreshVisible)
 })
@@ -69,14 +64,15 @@ onBeforeUnmount(() => {
         <button v-for="(label, value) in titles" v-show="value !== 'admin' || actor.internal_shared || actor.role === 'admin'" :key="value"
           :class="{ selected: section === value }" @click="section = value"><span>{{ label }}</span></button>
       </nav>
-      <div class="sidebar-bottom"><span class="connection-dot" :class="{ disconnected: error || !snapshotAt }"></span> {{ error ? '连接异常，请刷新重试' : snapshotAt ? '已连接数据服务' : '等待连接' }}<p>项目数据实时同步</p></div>
+      <div class="sidebar-bottom"><span class="connection-dot" :class="{ disconnected: error || !snapshotAt }"></span> {{ error ? '连接异常，请刷新重试' : snapshotAt ? '已连接数据服务' : '等待连接' }}<p>保存后立即进入正式项目数据</p></div>
     </aside>
     <main class="workspace-main">
       <header class="topbar"><span>{{ titles[section] }}</span><div class="inline"><span>公司共享工作台</span><a href="#display">打开大屏 ↗</a><FullscreenButton /></div></header>
       <div class="page-content">
         <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="section-gap" />
         <div class="page-toolbar"><span class="muted">{{ snapshotAt ? `最近读取 ${dateTime(snapshotAt)} · 每 5 秒自动同步` : '正在连接数据服务' }}</span><el-button :loading="loading" @click="refresh()">刷新数据</el-button></div>
-        <ProjectsPage v-if="section === 'projects'" :actor="actor" :projects="projects" :users="users" :meetings="meetings" :loading="loading" />
+        <ProjectsPage v-if="section === 'projects'" :actor="actor" :projects="projects" :users="users" :loading="loading" @saved="refresh" />
+        <DraftsPage v-if="section === 'assistant'" :status="status" @refresh="refresh" />
         <RemindersPage v-if="section === 'reminders'" :actor="actor" :projects="projects" />
         <AdminPage v-if="section === 'admin' && (actor.internal_shared || actor.role === 'admin')" :actor="actor" :users="users" :status="status" @refresh="refresh" />
       </div>

@@ -2,14 +2,14 @@
 from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 Text = Annotated[str, Field(max_length=2000)]
 ID = Annotated[str, Field(min_length=1, max_length=100)]
 Percent = Annotated[int, Field(strict=True, ge=0, le=100)]
-State = Literal['not_started', 'active', 'paused', 'completed', 'cancelled']
-OwnerRole = Literal['A角', 'B角', 'A1', 'A2', '主责', '搭档']
+State = Literal['active', 'paused', 'completed', 'cancelled']
+OwnerRole = Literal['A', 'B', 'A1', 'A2', '主责', '搭档']
 
 
 class Contract(BaseModel):
@@ -21,20 +21,13 @@ class OwnerAssignment(Contract):
     role: Annotated[str, Field(min_length=1, max_length=30)]
     primary: bool = False
 
-    @field_validator('role')
-    @classmethod
-    def uppercase_role(cls, value):
-        value = value.upper()
-        return {'A': 'A角', 'B': 'B角'}.get(value, value)
-
 
 class MilestoneCreate(Contract):
     name: Name
     criterion: Text = ''
     owner_id: ID | None = None
-    owner_name: Name | None = None
     start_date: date | None = None
-    due_date: date
+    due_date: date | None = None
     update_interval: Annotated[int, Field(strict=True, ge=1, le=30)] = 2
 
     @model_validator(mode='after')
@@ -52,19 +45,17 @@ class ProjectCreate(Contract):
     contact_info: Annotated[str, Field(max_length=200)] = ''
     owner_id: ID | None = None
     owner_name: Name | None = None
-    status: Literal['not_started', 'active'] = 'active'
+    status: Literal['active'] = 'active'
     member_ids: Annotated[list[ID], Field(max_length=200)] = []
     owner_roles: dict[ID, OwnerRole] = Field(default_factory=dict)
     owner_assignments: Annotated[list[OwnerAssignment], Field(max_length=50)] = Field(default_factory=list)
     start_date: date | None = None
-    due_date: date
+    due_date: date | None = None
     display_visible: bool = True
     milestones: Annotated[list[MilestoneCreate], Field(max_length=50)] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def dates(self):
-        if not (self.owner_id or self.owner_name or self.owner_assignments or self.owner_roles):
-            raise ValueError('项目负责人不能为空')
         if self.due_date and self.start_date and self.due_date < self.start_date:
             raise ValueError('截止日期不能早于开始日期')
         for node in self.milestones:
@@ -87,7 +78,7 @@ class ProjectPatch(Contract):
     start_date: date | None = None
     due_date: date | None = None
     display_visible: bool | None = None
-    reason: Annotated[str, Field(max_length=1000)] = ''
+    reason: Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class MilestonePatch(Contract):
@@ -97,7 +88,7 @@ class MilestonePatch(Contract):
     start_date: date | None = None
     due_date: date | None = None
     update_interval: Annotated[int, Field(strict=True, ge=1, le=30)] | None = None
-    reason: Annotated[str, Field(max_length=1000)] = ''
+    reason: Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class ProgressReport(Contract):
@@ -122,7 +113,7 @@ class ProgressReport(Contract):
 
 class StatusChange(Contract):
     status: State
-    reason: Annotated[str, Field(max_length=1000)] = ''
+    reason: Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class RecordedTask(Contract):
@@ -173,6 +164,12 @@ class Action(Contract):
     data: dict = Field(default_factory=dict)
 
 
+class ExecuteActionRequest(Contract):
+    action: Action
+    client_operation_id: Annotated[str, Field(min_length=8, max_length=100)]
+    expected_version: Annotated[int, Field(strict=True, ge=1)] | None = None
+
+
 class ParsedMessage(Action):
     schema_version: Literal['1'] = '1'
     missing_fields: Annotated[list[str], Field(max_length=30)] = []
@@ -183,7 +180,6 @@ class ParsedMessage(Action):
 class MessageInput(Contract):
     text: Annotated[str, Field(min_length=1, max_length=6000)]
     client_message_id: Annotated[str, Field(min_length=8, max_length=100)]
-    previous_draft_id: ID | None = None
 
 
 class UserCreate(Contract):
@@ -203,7 +199,6 @@ class ReminderSettings(Contract):
     start_hour: Annotated[int, Field(strict=True, ge=0, le=22)] = 9
     end_hour: Annotated[int, Field(strict=True, ge=1, le=23)] = 18
     due_hour: Annotated[int, Field(strict=True, ge=0, le=23)] = 18
-    reminder_hour: Annotated[int, Field(strict=True, ge=0, le=23)] = 12
 
     @model_validator(mode='after')
     def valid(self):

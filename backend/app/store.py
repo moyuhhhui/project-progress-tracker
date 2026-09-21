@@ -67,6 +67,7 @@ class Store:
     def __init__(self, path=None):
         self.path = str(path or os.getenv('TRACKER_DB', 'data/tracker.sqlite3'))
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._backup_legacy_operations_database()
         with self.connect() as db:
             db.executescript('''
             PRAGMA journal_mode=WAL;
@@ -92,6 +93,20 @@ class Store:
               status TEXT NOT NULL, created_at TEXT NOT NULL, response TEXT,
               FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS operations (
+              id TEXT PRIMARY KEY,
+              source TEXT NOT NULL,
+              source_message_id TEXT,
+              actor_ref TEXT NOT NULL DEFAULT '',
+              request_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              result TEXT,
+              diagnostics TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS operation_source_message_unique
+              ON operations(source, source_message_id)
+              WHERE source_message_id IS NOT NULL;
             CREATE TABLE IF NOT EXISTS audit (
               id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL,
               user_id TEXT NOT NULL, at TEXT NOT NULL, intent TEXT NOT NULL,
@@ -105,7 +120,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS reminders (
               id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, milestone_id TEXT NOT NULL,
-              owner_id TEXT NOT NULL, local_day TEXT NOT NULL, reasons TEXT NOT NULL,
+              owner_id TEXT, local_day TEXT NOT NULL, reasons TEXT NOT NULL,
               status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL, next_attempt TEXT, detail TEXT NOT NULL DEFAULT ''
             );
@@ -127,17 +142,82 @@ class Store:
               status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
               FOREIGN KEY(created_by) REFERENCES users(id)
             );
-            CREATE TABLE IF NOT EXISTS meeting_reminders (
-              id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, local_day TEXT NOT NULL,
-              status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
-              next_attempt TEXT, detail TEXT NOT NULL DEFAULT '',
-              FOREIGN KEY(meeting_id) REFERENCES meetings(id)
-            );
             ''')
             # 一次性绑定码已停用；企业微信身份由共享模式或成员管理配置。
             db.execute('DROP TABLE IF EXISTS wecom_pairings')
+        self._migrate_operations()
         self._migrate_projects()
         self._migrate_owner_assignments()
+        self._migrate_business_states()
+        self._migrate_nullable_reminder_owners()
+
+    def _backup_legacy_operations_database(self):
+        database_path = Path(self.path)
+        if not database_path.exists():
+            return
+        with closing(sqlite3.connect(self.path)) as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            if not {'audit', 'reports'}.issubset(tables):
+                return
+            audit_columns = {row[1] for row in db.execute('PRAGMA table_info(audit)')}
+            report_columns = {row[1] for row in db.execute('PRAGMA table_info(reports)')}
+        if ('draft_id' not in audit_columns or 'draft_id' not in report_columns
+                or 'operation_id' in audit_columns and 'operation_id' in report_columns):
+            return
+        if list(database_path.parent.glob(f'{database_path.name}.before-operations-*.bak')):
+            return
+        backup_path = f'{self.path}.before-operations-{secrets.token_hex(6)}.bak'
+        with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(backup_path)) as backup:
+            source.backup(backup)
+
+    def _migrate_operations(self):
+        with self.connect(write=True) as db:
+            audit_count = db.execute('SELECT count(*) FROM audit').fetchone()[0]
+            report_count = db.execute('SELECT count(*) FROM reports').fetchone()[0]
+            audit_columns = {row['name'] for row in db.execute('PRAGMA table_info(audit)')}
+            report_columns = {row['name'] for row in db.execute('PRAGMA table_info(reports)')}
+            if 'operation_id' not in audit_columns:
+                db.execute('ALTER TABLE audit ADD COLUMN operation_id TEXT')
+            if 'operation_id' not in report_columns:
+                db.execute('ALTER TABLE reports ADD COLUMN operation_id TEXT')
+            missing_links = db.execute(
+                'SELECT EXISTS(SELECT 1 FROM audit WHERE operation_id IS NULL) '
+                'OR EXISTS(SELECT 1 FROM reports WHERE operation_id IS NULL)'
+            ).fetchone()[0]
+            if not missing_links:
+                return
+            rows = db.execute('''
+                SELECT draft_id,user_id,at,julianday(at) AS operation_time,
+                       'audit' AS table_name,id AS row_id FROM audit
+                WHERE trim(draft_id) != ''
+                UNION ALL
+                SELECT draft_id,user_id,at,julianday(at) AS operation_time,
+                       'reports' AS table_name,id AS row_id FROM reports
+                WHERE trim(draft_id) != ''
+                ORDER BY operation_time,table_name,row_id
+            ''').fetchall()
+            operations = {}
+            for row in rows:
+                operations.setdefault(row['draft_id'], (row['user_id'], row['at']))
+            if (db.execute("SELECT count(*) FROM audit WHERE trim(draft_id) = ''").fetchone()[0]
+                    or db.execute("SELECT count(*) FROM reports WHERE trim(draft_id) = ''").fetchone()[0]):
+                raise ValueError('历史记录缺少 draft_id，操作迁移已停止')
+            db.executemany(
+                'INSERT INTO operations VALUES(?,?,?,?,?,?,?,NULL,?)',
+                [(operation_id, 'legacy', None, actor_ref,
+                  hashlib.sha256(operation_id.encode()).hexdigest(), 'done', created_at, encode({}))
+                 for operation_id, (actor_ref, created_at) in operations.items()]
+            )
+            db.execute('UPDATE audit SET operation_id=draft_id WHERE operation_id IS NULL')
+            db.execute('UPDATE reports SET operation_id=draft_id WHERE operation_id IS NULL')
+            if (db.execute('SELECT count(*) FROM audit').fetchone()[0] != audit_count
+                    or db.execute('SELECT count(*) FROM reports').fetchone()[0] != report_count):
+                raise RuntimeError('历史记录行数在操作迁移中发生变化')
+            if (db.execute('SELECT count(*) FROM audit WHERE operation_id IS NULL').fetchone()[0]
+                    or db.execute('SELECT count(*) FROM reports WHERE operation_id IS NULL').fetchone()[0]):
+                raise RuntimeError('历史记录操作关联回填不完整')
 
     def _migrate_projects(self):
         with self.connect(write=True) as db:
@@ -160,29 +240,64 @@ class Store:
             for row in db.execute('SELECT id,data FROM projects'):
                 project = decode_project(row['data'])
                 assignments = project.get('owner_assignments') or legacy_owner_assignments(project.get('owner_name'))
-                assignments = [
-                    {**item, 'role': {'A': 'A角', 'B': 'B角'}.get(item['role'].upper(), item['role'].upper())}
-                    for item in assignments
-                ]
-                roles = {user_id: {'A': 'A角', 'B': 'B角'}.get(role.upper(), role.upper())
-                         for user_id, role in project.get('owner_roles', {}).items()}
                 if assignments:
                     summary = owner_summary(assignments)
-                    if (project.get('owner_assignments') != assignments or project.get('owner_name') != summary
-                            or project.get('owner_roles', {}) != roles):
+                    if project.get('owner_assignments') != assignments or project.get('owner_name') != summary:
                         project['owner_assignments'] = assignments
                         project['owner_name'] = summary
-                        project['owner_roles'] = roles
                         updates.append((encode_project(project), row['id']))
-                elif project.get('owner_roles', {}) != roles:
-                    project['owner_roles'] = roles
-                    updates.append((encode_project(project), row['id']))
             if not updates:
                 return
             backup_path = f'{self.path}.before-owner-assignments-{secrets.token_hex(6)}.bak'
             with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(backup_path)) as backup:
                 source.backup(backup)
             db.executemany('UPDATE projects SET data=? WHERE id=?', updates)
+
+    def _migrate_business_states(self):
+        """把旧的未开始/前期准备状态一次性收敛为进行中。"""
+        with self.connect(write=True) as db:
+            updates = []
+            for row in db.execute('SELECT id,data FROM projects'):
+                project = decode_project(row['data'])
+                changed = False
+                if project.get('status') == 'not_started':
+                    project['status'] = 'active'
+                    changed = True
+                for node in project.get('milestones', []):
+                    if node.get('status') == 'not_started':
+                        node['status'] = 'active'
+                        changed = True
+                    if 'preparation' in node:
+                        node.pop('preparation', None)
+                        changed = True
+                if changed:
+                    updates.append((encode_project(project), row['id']))
+            if not updates:
+                return
+            backup_path = f'{self.path}.before-business-states-{secrets.token_hex(6)}.bak'
+            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(backup_path)) as backup:
+                source.backup(backup)
+            db.executemany('UPDATE projects SET data=? WHERE id=?', updates)
+
+    def _migrate_nullable_reminder_owners(self):
+        with self.connect(write=True) as db:
+            columns = {row['name']: row for row in db.execute('PRAGMA table_info(reminders)')}
+            owner_column = columns.get('owner_id')
+            if owner_column is None or not owner_column['notnull']:
+                return
+            count = db.execute('SELECT count(*) FROM reminders').fetchone()[0]
+            db.execute('''CREATE TABLE reminders_migrated (
+              id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, milestone_id TEXT NOT NULL,
+              owner_id TEXT, local_day TEXT NOT NULL, reasons TEXT NOT NULL,
+              status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL, next_attempt TEXT, detail TEXT NOT NULL DEFAULT ''
+            )''')
+            db.execute('INSERT INTO reminders_migrated SELECT id,project_id,milestone_id,owner_id,local_day,reasons,status,attempts,updated_at,next_attempt,detail FROM reminders')
+            migrated = db.execute('SELECT count(*) FROM reminders_migrated').fetchone()[0]
+            if migrated != count:
+                raise RuntimeError('提醒负责人可空迁移行数不一致')
+            db.execute('DROP TABLE reminders')
+            db.execute('ALTER TABLE reminders_migrated RENAME TO reminders')
 
     @contextmanager
     def connect(self, write=False):
@@ -199,6 +314,24 @@ class Store:
             raise
         finally:
             db.close()
+
+    def create_operation(self, db, *, operation_id, source, source_message_id,
+                         actor_ref, request_hash, created_at, diagnostics=None):
+        db.execute(
+            'INSERT INTO operations VALUES(?,?,?,?,?,?,?,NULL,?)',
+            (operation_id, source, source_message_id, actor_ref, request_hash,
+             'processing', created_at, encode(diagnostics or {})))
+
+    def operation_by_source(self, db, source, source_message_id):
+        if source_message_id is None:
+            return None
+        return db.execute(
+            'SELECT * FROM operations WHERE source=? AND source_message_id=?',
+            (source, source_message_id)).fetchone()
+
+    def finish_operation(self, db, operation_id, status, result):
+        db.execute('UPDATE operations SET status=?,result=? WHERE id=?',
+                   (status, encode(result), operation_id))
 
     def add_user(self, name, role='member', wecom_user_id=''):
         token = secrets.token_urlsafe(32)

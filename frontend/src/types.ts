@@ -1,4 +1,4 @@
-export type State = 'not_started' | 'active' | 'paused' | 'completed' | 'cancelled'
+export type State = 'active' | 'paused' | 'completed' | 'cancelled'
 export type Role = 'admin' | 'member' | 'display'
 export type Flag = 'overdue' | 'stale' | 'due_soon' | 'blocked'
 export interface User { id: string; name: string; role?: Role; active: boolean | number; wecom_user_id?: string }
@@ -23,6 +23,8 @@ export interface Project {
 export type Intent = 'record_item' | 'create_project' | 'edit_project' | 'add_milestone' | 'edit_milestone' |
   'report_progress' | 'project_status' | 'milestone_status' | 'create_meeting' | 'query' | 'ignore'
 export interface Action { intent: Intent; project_id?: string; milestone_id?: string; data: Record<string, unknown> }
+export interface ExecuteActionRequest { action: Action; client_operation_id: string; expected_version?: number }
+export interface Meeting { id: string; start_at: string; title: string; project_id?: number | null; attendee_ids: string[]; location: string; notes: string; status: string }
 export interface Draft {
   id: string; status: 'pending' | 'needs_input' | 'confirmed' | 'cancelled' | 'expired'
   created_at: string; expires_at: string; expected_version: number | null; action: Action
@@ -43,7 +45,8 @@ export interface Reminder {
   id: string; project_id: number; milestone_id: string; owner_name: string; reasons: Flag[]
   status: string; attempts: number; updated_at: string; detail: string
 }
-export interface Settings { start_hour: number; end_hour: number; due_hour: number; reminder_hour: number; workday_overrides: Record<string, boolean> }
-export interface Meeting { id: string; start_at: string; title: string; project_id?: number | null; attendee_ids: string[]; location: string; notes: string; status: string }
-export type MessageResult = { kind: 'draft'; draft: Draft } | { kind: 'meeting'; meeting: Meeting } | { kind: 'query'; projects: Project[] } |
+export interface Settings { start_hour: number; end_hour: number; due_hour: number; workday_overrides: Record<string, boolean> }
+export type MessageResult = { kind: 'saved'; result: Record<string, unknown> } |
+  { kind: 'batch'; results: Record<string, unknown>[]; failures: { project_name: string; message: string }[]; recognized_actions: number; saved_actions: number; business_failures: number } |
+  { kind: 'needs_input'; message: string } | { kind: 'query'; projects: Project[] } |
   { kind: 'ignored'; message: string }

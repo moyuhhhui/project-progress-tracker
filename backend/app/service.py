@@ -1,15 +1,15 @@
 import copy
+import hashlib
+import hmac
 import json
 import os
-import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 
 from pydantic import ValidationError
 
-from .models import (Action, ProjectCreate, ProjectPatch, MilestoneCreate, MilestonePatch,
-                     ProgressReport, StatusChange, RecordItem, MeetingCreate)
+from .models import (Action, ExecuteActionRequest, ProjectCreate, ProjectPatch, MilestoneCreate,
+                     MilestonePatch, ProgressReport, StatusChange, RecordItem, MeetingCreate)
 from .store import Store, encode, encode_project, owner_summary
 
 TZ = timezone(timedelta(hours=8))
@@ -42,6 +42,10 @@ def manager(user, project):
     return all_access(user) or user['id'] == project['owner_id'] or (not project['owner_id'] and user['id'] == project['created_by'])
 
 
+def role_is_primary(role):
+    return role in ('A', '主责')
+
+
 def validate(model, data):
     try:
         result = model.model_validate(data)
@@ -52,45 +56,6 @@ def validate(model, data):
     for field in result.model_fields_set:
         require(getattr(result, field) is not None, f'{field} 不能设置为空；清空请用明确的清除操作')
     return result
-
-
-def compact_project_name(value):
-    return re.sub(r'[\W_]+', '', value or '').upper()
-
-
-def project_name_match_level(name, text):
-    name, text = compact_project_name(name), compact_project_name(text)
-    if not name or not text:
-        return None
-    if name == text or name in text:
-        return 2
-    core = re.sub(r'^[A-Z]+', '', name)
-    text_core = re.sub(r'^[A-Z]+', '', text)
-    if len(core) >= 4 and (core == text_core or core in text):
-        return 4
-    if (len(core) >= 4 and core[:2] in text and
-            any(core[index:index + 2] in text for index in range(2, len(core) - 1))):
-        return 5
-    for target in {name, core}:
-        if len(target) >= 4 and len(text) >= len(target) and any(
-                SequenceMatcher(None, target, text[index:index + len(target)]).ratio() >= 0.8
-                for index in range(len(text) - len(target) + 1)):
-            return 6
-    return None
-
-
-def matching_projects(projects, text, *, max_level=None):
-    compact = compact_project_name(text)
-    scored = []
-    for project in projects:
-        code = compact_project_name(project.get('code'))
-        level = 1 if code and code in compact else project_name_match_level(project['name'], text)
-        if level and (max_level is None or level <= max_level):
-            scored.append((level, project))
-    if not scored:
-        return []
-    best = min(level for level, _ in scored)
-    return [project for level, project in scored if level == best]
 
 
 class Service:
@@ -153,10 +118,19 @@ class Service:
                     and (not (project['due_date'] and node['due_date']) or node['due_date'] <= project['due_date']),
                     '节点日期必须在项目计划范围内，且截止不早于开始')
 
+    def assignments_from_roles(self, db, roles):
+        assignments = []
+        for uid, role in roles.items():
+            user = self.store.user(db, uid)
+            require(user and user['role'] != 'display', '责任分工成员不存在或不可作为负责人')
+            assignments.append({'name': user['name'], 'role': role,
+                                'primary': role_is_primary(role)})
+        return assignments
+
     @staticmethod
     def new_node(data):
         return {**data, 'id': secrets.token_hex(8), 'original_due_date': data['due_date'],
-                'status': 'not_started', 'progress': 0, 'summary': '', 'blocker': '',
+                'status': 'active', 'progress': 0, 'summary': '', 'blocker': '',
                 'next_step': '', 'expected_date': None, 'last_report_at': None,
                 'started_at': None, 'completed_at': None, 'paused_at': None, 'resumed_at': None}
 
@@ -178,13 +152,8 @@ class Service:
                     created_at=at, updated_at=at, completed_at=None, paused_at=None, resumed_at=None)
             if item['owner_assignments']:
                 require(manager(actor, project), '仅项目管理人可修改负责人', 403)
-                assignments = item['owner_assignments']
-                if current:
-                    assignments = list({entry['name']: entry for entry in
-                                        [*project['owner_assignments'], *assignments]}.values())
-                require(len(assignments) <= 50, '负责人分工最多 50 人')
-                project['owner_assignments'] = assignments
-                project['owner_name'] = owner_summary(assignments)
+                project['owner_assignments'] = item['owner_assignments']
+                project['owner_name'] = owner_summary(item['owner_assignments'])
                 project['owner_id'] = None
             elif item['owner_name']:
                 require(manager(actor, project), '仅项目管理人可修改负责人', 403)
@@ -201,29 +170,29 @@ class Service:
                 node = self.new_node(dict(name=entry['title'] or entry['text'][:100], criterion='', owner_id=owner,
                     start_date=entry['start_date'], due_date=entry['due_date'], update_interval=2))
                 node.update(summary=entry['text'], time_text=entry['time_text'], recorded_at=at,
-                            preparation=project['status'] == 'not_started', status='active', started_at=at)
+                            status='active', started_at=at)
                 project['milestones'].append(node)
             project['updated_at'] = at
         elif action.intent == 'create_project':
             require(not action.project_id and not action.milestone_id, '创建时不接受已有项目或节点编号')
             data = validate(ProjectCreate, action.data).model_dump(mode='json')
+            require(not (data['owner_roles'] and data['owner_assignments']),
+                    '负责人分工请使用成员编号分工或姓名分工中的一种')
             if not all_access(actor):
                 require(data['owner_id'] == actor['id'], '只能创建由本人负责的项目', 403)
                 require(set(data['member_ids']) <= {actor['id']} and
                         all(n['owner_id'] == actor['id'] for n in data['milestones']),
                         '首次立项不能直接给其他员工分派任务；创建后由项目负责人管理成员', 403)
             nodes = [self.new_node(n) for n in data.pop('milestones')]
-            if self.internal_shared:
-                for node in nodes:
-                    node['owner_name'] = node.get('owner_name') or node['owner_id']
-                    node['owner_id'] = None
             project = {**data, 'milestones': nodes,
                        'original_due_date': data['due_date'], 'created_by': actor['id'],
                        'created_at': at, 'updated_at': at, 'completed_at': None,
                        'paused_at': None, 'resumed_at': None}
+            if project['owner_roles']:
+                project['owner_assignments'] = self.assignments_from_roles(db, project['owner_roles'])
+                project['owner_name'] = owner_summary(project['owner_assignments'])
             if project['owner_assignments']:
                 project['owner_name'] = owner_summary(project['owner_assignments'])
-                project['owner_id'] = None
         else:
             require(current is not None, '请选择项目')
             project = copy.deepcopy(current)
@@ -236,9 +205,13 @@ class Service:
                 patch.pop('reason')
                 require(bool(patch), '没有需要修改的字段')
                 project.update(patch)
+                if 'owner_roles' in patch and 'owner_assignments' in patch:
+                    require(False, '负责人分工请使用成员编号分工或姓名分工中的一种')
+                if 'owner_roles' in patch:
+                    project['owner_assignments'] = self.assignments_from_roles(db, patch['owner_roles'])
+                    project['owner_name'] = owner_summary(project['owner_assignments']) or None
                 if 'owner_assignments' in patch:
                     project['owner_name'] = owner_summary(patch['owner_assignments']) or None
-                    project['owner_id'] = None
                 elif 'owner_name' in patch and 'owner_id' not in patch:
                     project['owner_assignments'] = []
                     project['owner_id'] = None
@@ -270,8 +243,6 @@ class Service:
                     node['auto_complete_disabled'] = True
                     if change.status == 'completed':
                         node['progress'] = 100
-                    if change.status == 'not_started':
-                        node['progress'] = 0
                 elif action.intent == 'report_progress':
                     require(manager(actor, project) or node['owner_id'] == actor['id'], '无权更新此节点', 403)
                     require(project['status'] != 'paused' and node['status'] not in ('completed', 'cancelled', 'paused'),
@@ -291,10 +262,6 @@ class Service:
                         for key in report.clear_fields:
                             node[key] = None if key == 'expected_date' else ''
                         node['last_report_at'] = at
-                        if node['status'] == 'not_started':
-                            node['status'], node['started_at'] = 'active', at
-                        if project['status'] == 'not_started' and not node.get('preparation'):
-                            project['status'] = 'active'
                 else:
                     raise BusinessError('不支持的操作')
             project['updated_at'] = at
@@ -305,8 +272,6 @@ class Service:
     def change_state(obj, status, at, reason):
         previous = obj['status']
         require(status != previous, '状态没有变化')
-        if status == 'not_started':
-            require(previous == 'not_started', '已开始的工作不能重置为未开始，请使用恢复进行中')
         obj['status'] = status
         obj['pause_reason'] = reason if status == 'paused' else ''
         if status == 'completed':
@@ -333,19 +298,120 @@ class Service:
                              (previous_draft_id, actor['id'], self.shared_actor(actor), self.clock().isoformat())).rowcount
         require(changed == 1, '原草稿已结束、过期或正在被另一条补充替换，请查看最新草稿', 409)
 
+    def _persist_action(self, db, actor, action, current, operation_id):
+        project = self.propose(db, actor, action, current)
+        if current:
+            pid, version = int(current['id']), current['version'] + 1
+            for field in ('id', 'code', 'version'):
+                project.pop(field, None)
+            db.execute('UPDATE projects SET version=?,data=? WHERE id=?',
+                       (version, encode_project(project), pid))
+        else:
+            require(action.intent != 'record_item' or not any(
+                self.store.project(row)['name'] == project['name']
+                for row in db.execute('SELECT * FROM projects')),
+                '项目名称冲突，请核对后重试')
+            version = 1
+            pid = db.execute('INSERT INTO projects(version,data) VALUES(1,?)',
+                             (encode_project(project),)).lastrowid
+        at = self.clock().isoformat()
+        db.execute(
+            'INSERT INTO audit(project_id,user_id,at,intent,before_data,after_data,draft_id,operation_id) '
+            'VALUES(?,?,?,?,?,?,?,?)',
+            (pid, actor['id'], at, action.intent, encode(current) if current else None,
+             encode(project), operation_id, operation_id))
+        if action.intent == 'report_progress':
+            report_data = {**action.data,
+                'before_progress': self.find_node(current, action.milestone_id)['progress'],
+                'after_progress': self.find_node(project, action.milestone_id)['progress']}
+            db.execute(
+                'INSERT INTO reports(project_id,milestone_id,user_id,at,data,draft_id,operation_id) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (pid, action.milestone_id, actor['id'], at, encode(report_data),
+                 operation_id, operation_id))
+        return {'project_id': str(pid), 'code': f'P{pid:04d}', 'version': version,
+                'message': '已保存'}
+
+    def _resolve_action(self, db, actor, action):
+        if action.intent == 'record_item' and not action.project_id:
+            name = action.data.get('project_name', '').strip()
+            matches = [project for row in db.execute('SELECT * FROM projects')
+                       if (project := self.store.project(row))['name'] == name]
+            require(all(allowed(actor, project) for project in matches),
+                    '无法安全关联项目', 403)
+            require(len(matches) <= 1, '项目名称重复，请补充项目编号')
+            if matches:
+                action = action.model_copy(update={'project_id': matches[0]['id']})
+        current = (None if action.intent == 'create_project'
+                   or (action.intent == 'record_item' and not action.project_id)
+                   else self.get_project(db, action.project_id, actor))
+        return action, current
+
+    def _persist_meeting(self, db, actor, action):
+        meeting = validate(MeetingCreate, action.data)
+        project_id = meeting.project_id
+        if project_id:
+            project = self.get_project(db, project_id, actor)
+            require(allowed(actor, project), '无权关联该项目', 403)
+            project_id = int(project['id'])
+        for uid in meeting.attendee_ids:
+            member = self.store.user(db, uid)
+            require(member and member['active'] and member['role'] != 'display', '参会人不存在或不可用')
+        at = self.clock().isoformat()
+        meeting_id = 'M' + secrets.token_hex(10)
+        db.execute('INSERT INTO meetings(id,created_by,project_id,start_at,title,attendee_ids,location,notes,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                   (meeting_id, actor['id'], project_id, meeting.start_at.isoformat(), meeting.title or '未命名会议',
+                    encode(meeting.attendee_ids), meeting.location or '', meeting.notes or '', 'active', at, at))
+        return {'meeting_id': meeting_id, 'start_at': meeting.start_at.isoformat(),
+                'title': meeting.title or '未命名会议', 'message': '会议已保存'}
+
+    def execute_action(self, user, request: ExecuteActionRequest, *, source, actor_ref='', diagnostics=None):
+        request_body = encode({'action': request.action.model_dump(mode='json'),
+                               'expected_version': request.expected_version})
+        request_hash = hashlib.sha256(request_body.encode()).hexdigest()
+        with self.store.connect(write=True) as db:
+            actor = self.fresh_user(db, user)
+            resolved_actor_ref = actor_ref or actor['id']
+            existing = self.store.operation_by_source(db, source, request.client_operation_id)
+            if existing:
+                require(hmac.compare_digest(existing['actor_ref'], resolved_actor_ref),
+                        '操作记录不存在', 404)
+                require(existing['request_hash'] == request_hash,
+                        '同一操作编号不能用于不同内容', 409)
+                require(existing['status'] == 'done' and existing['result'],
+                        '操作正在处理或上次处理中断，请检查项目列表', 409)
+                return json.loads(existing['result'])
+            operation_id = secrets.token_hex(16)
+            self.store.create_operation(db, operation_id=operation_id, source=source,
+                source_message_id=request.client_operation_id, actor_ref=resolved_actor_ref,
+                request_hash=request_hash, created_at=self.clock().isoformat(),
+                diagnostics=diagnostics)
+            if request.action.intent == 'create_meeting':
+                result = self._persist_meeting(db, actor, request.action)
+                result['operation_id'] = operation_id
+                self.store.finish_operation(db, operation_id, 'done', result)
+                return result
+            action, current = self._resolve_action(db, actor, request.action)
+            require(current is None or request.expected_version == current['version'],
+                    '项目已被修改，请刷新后重试', 409)
+            result = self._persist_action(db, actor, action, current, operation_id)
+            result['operation_id'] = operation_id
+            self.store.finish_operation(db, operation_id, 'done', result)
+            return result
+
     def create_draft(self, user, action: Action, source_text='', diagnostics=None, *, previous_draft_id=None, auto_save=False):
         at = self.clock()
         with self.store.connect(write=True) as db:
             actor = self.fresh_user(db, user)
             self.replace_previous(db, actor, previous_draft_id)
             if auto_save and action.intent == 'create_project':
-                projects = [self.store.project(row) for row in db.execute('SELECT * FROM projects')]
-                require(not matching_projects(projects, action.data.get('name', ''), max_level=4),
+                require(not any(self.store.project(row)['name'] == action.data.get('name')
+                                for row in db.execute('SELECT * FROM projects')),
                         '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
             if action.intent == 'record_item' and not action.project_id:
                 name = action.data.get('project_name', '').strip()
-                matches = matching_projects(
-                    [self.store.project(row) for row in db.execute('SELECT * FROM projects')], name)
+                matches = [p for row in db.execute('SELECT * FROM projects')
+                           if (p := self.store.project(row))['name'] == name]
                 require(all(allowed(actor, p) for p in matches), '无法安全关联项目，请管理员核对项目归属与成员权限；未创建新项目')
                 require(len(matches) <= 1, '项目名称重复，请补充项目编号')
                 if matches:
@@ -403,28 +469,13 @@ class Service:
                    else self.get_project(db, action.project_id, actor))
         require(current is None or current['version'] == row['expected_version'],
                 '项目已被修改，请重新预览，避免覆盖最新数据', 409)
-        project = self.propose(db, actor, action, current)
-        if current:
-            pid, version = int(current['id']), current['version'] + 1
-            for field in ('id', 'code', 'version'):
-                project.pop(field, None)
-            db.execute('UPDATE projects SET version=?, data=? WHERE id=?', (version, encode_project(project), pid))
-        else:
-            require(not matching_projects(
-                        [self.store.project(row) for row in db.execute('SELECT * FROM projects')],
-                        project['name'], max_level=4),
-                    '项目名称冲突，请管理员核对项目归属与成员权限；未创建新项目')
-            version = 1
-            pid = db.execute('INSERT INTO projects(version,data) VALUES(1,?)', (encode_project(project),)).lastrowid
-        at = self.clock().isoformat()
-        db.execute('INSERT INTO audit(project_id,user_id,at,intent,before_data,after_data,draft_id) VALUES(?,?,?,?,?,?,?)',
-                   (pid, actor['id'], at, action.intent, encode(current) if current else None, encode(project), draft_id))
-        if action.intent == 'report_progress':
-            report_data = {**action.data, 'before_progress': self.find_node(current, action.milestone_id)['progress'],
-                           'after_progress': self.find_node(project, action.milestone_id)['progress']}
-            db.execute('INSERT INTO reports(project_id,milestone_id,user_id,at,data,draft_id) VALUES(?,?,?,?,?,?)',
-                       (pid, action.milestone_id, actor['id'], at, encode(report_data), draft_id))
-        result = {'project_id': str(pid), 'code': f'P{pid:04d}', 'version': version, 'message': '已保存'}
+        if not db.execute('SELECT 1 FROM operations WHERE id=?', (draft_id,)).fetchone():
+            self.store.create_operation(db, operation_id=draft_id, source='legacy',
+                source_message_id=None, actor_ref=actor['id'],
+                request_hash=hashlib.sha256(draft_id.encode()).hexdigest(),
+                created_at=row['created_at'], diagnostics=json.loads(row['diagnostics']))
+        result = self._persist_action(db, actor, action, current, draft_id)
+        self.store.finish_operation(db, draft_id, 'done', result)
         db.execute("UPDATE drafts SET status='confirmed',result=? WHERE id=?", (encode(result), draft_id))
         return result
 
@@ -444,60 +495,33 @@ class Service:
             projects = [self.store.project(r) for r in db.execute('SELECT * FROM projects ORDER BY id DESC')]
         projects = [p for p in projects if p['display_visible']] if display else [p for p in projects if allowed(user, p)]
         for p in projects:
-            p['owner_assignments'] = p.get('owner_assignments', [])
-            if not p['owner_assignments'] and p.get('owner_roles'):
+            if not p.get('owner_assignments') and p.get('owner_roles'):
                 p['owner_assignments'] = [
-                    {'name': users.get(user_id, '成员不可用'), 'role': role,
-                     'primary': str(role).upper().startswith('A')}
-                    for user_id, role in p['owner_roles'].items()
+                    {'name': users.get(uid, '成员不可用'), 'role': role,
+                     'primary': role_is_primary(role)}
+                    for uid, role in p['owner_roles'].items()
                 ]
-            p['owner_name'] = users.get(p['owner_id']) or p.get('owner_name') or '待明确'
+            else:
+                p['owner_assignments'] = p.get('owner_assignments', [])
+            p['owner_name'] = (owner_summary(p['owner_assignments']) if p['owner_assignments']
+                               else users.get(p['owner_id']) or p.get('owner_name') or '待明确')
             for n in p['milestones']:
-                n['owner_name'] = users.get(n['owner_id']) or n.get('owner_name') or '待明确'
+                n['owner_name'] = users.get(n['owner_id'], '待明确')
             decorate(p, self.clock(), settings)
         projects.sort(key=lambda p: (-p['risk_score'], p['due_date'] or '9999-12-31', p['id']))
         if display:
             project_fields = {'id','code','name','description','owner_name','owner_assignments','start_date','due_date','status','progress','pause_reason',
                               'flags','risk_score','updated_at','milestones'}
-            node_fields = {'id','name','criterion','owner_name','start_date','due_date','status','progress','summary','pause_reason','time_text','preparation','recorded_at',
+            node_fields = {'id','name','criterion','owner_name','start_date','due_date','status','progress','summary','pause_reason','time_text','recorded_at',
                            'blocker','next_step','expected_date','last_report_at','flags'}
             return [{**{k:v for k,v in p.items() if k in project_fields},
                      'milestones': [{k:v for k,v in n.items() if k in node_fields} for n in p['milestones']]} for p in projects]
         return projects
 
-    def create_meeting(self, user, data):
-        meeting = validate(MeetingCreate, data)
-        at = self.clock().isoformat()
-        meeting_id = 'M' + secrets.token_hex(10)
-        with self.store.connect(write=True) as db:
-            actor = self.fresh_user(db, user)
-            project_id = meeting.project_id
-            if project_id:
-                project = self.get_project(db, project_id, actor)
-                require(allowed(actor, project), '无权关联该项目', 403)
-                project_id = int(project['id'])
-            for uid in meeting.attendee_ids:
-                member = self.store.user(db, uid)
-                require(member and member['active'] and member['role'] != 'display', '参会人不存在或不可用')
-            db.execute('INSERT INTO meetings(id,created_by,project_id,start_at,title,attendee_ids,location,notes,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                       (meeting_id, actor['id'], project_id, meeting.start_at.isoformat(), meeting.title or '未命名会议',
-                        encode(meeting.attendee_ids), meeting.location or '', meeting.notes or '', 'active', at, at))
-        return self.meeting(user, meeting_id)
-
-    def meeting(self, user, meeting_id):
-        with self.store.connect() as db:
-            actor = self.fresh_user(db, user)
-            row = db.execute('SELECT * FROM meetings WHERE id=?', (meeting_id,)).fetchone()
-            require(row is not None, '会议不存在', 404)
-            require(all_access(actor) or row['created_by'] == actor['id'] or actor['id'] in json.loads(row['attendee_ids']), '无权查看该会议', 403)
-            result = dict(row)
-            result['attendee_ids'] = json.loads(result['attendee_ids'])
-            return result
-
     def meetings(self, user, display=False):
         with self.store.connect() as db:
             actor = user if display and user['role'] == 'display' else self.fresh_user(db, user)
-            rows = [dict(r) for r in db.execute(
+            rows = [dict(row) for row in db.execute(
                 'SELECT * FROM meetings WHERE status=? AND (created_by=? OR attendee_ids LIKE ? OR ?)',
                 ('active', actor['id'], f'%"{actor["id"]}"%', all_access(actor) or display)).fetchall()]
             for row in rows:

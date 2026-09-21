@@ -28,6 +28,50 @@ class APITests(unittest.TestCase):
     def headers(self, actor=None):
         return {'Authorization': 'Bearer ' + (actor or self.admin)['access_key']}
 
+    def test_direct_action_endpoint_saves_and_is_idempotent(self):
+        body = {'client_operation_id': 'api-create-001', 'expected_version': None,
+                'action': {'intent': 'create_project', 'data': {'name': 'API 直接保存'}}}
+        first = self.client.post('/api/actions', json=body, headers=self.headers())
+        second = self.client.post('/api/actions', json=body, headers=self.headers())
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.json(), first.json())
+        self.assertEqual(len(self.client.get('/api/projects', headers=self.headers()).json()['projects']), 1)
+
+    def test_direct_meeting_action_is_saved_and_listed(self):
+        response = self.client.post('/api/actions', json={
+            'client_operation_id': 'api-meeting-001',
+            'action': {'intent': 'create_meeting', 'data': {
+                'start_at': '2026-09-22T10:00:00+08:00', 'title': '项目评审'}}},
+            headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['title'], '项目评审')
+        meetings = self.client.get('/api/meetings', headers=self.headers())
+        self.assertEqual(meetings.status_code, 200)
+        self.assertEqual(meetings.json()['meetings'][0]['title'], '项目评审')
+
+    def test_a1_a2_roles_are_normalized_for_workspace_and_display(self):
+        body = {'client_operation_id': 'api-roles-001', 'action': {
+            'intent': 'create_project', 'data': {
+                'name': 'A1 A2 分工项目', 'owner_id': self.admin['id'],
+                'member_ids': [self.admin['id'], self.member['id']],
+                'owner_roles': {self.admin['id']: 'A1', self.member['id']: 'A2'}}}}
+        response = self.client.post('/api/actions', json=body, headers=self.headers())
+        self.assertEqual(response.status_code, 200, response.text)
+        project = self.client.get('/api/projects', headers=self.headers()).json()['projects'][0]
+        self.assertEqual(project['owner_name'], '管理（A1）、成员（A2）')
+        self.assertEqual([(item['name'], item['role'], item['primary']) for item in project['owner_assignments']], [
+            ('管理', 'A1', False), ('成员', 'A2', False)])
+        display = self.client.get('/api/display', headers=self.headers(self.display)).json()['projects'][0]
+        self.assertEqual([(item['name'], item['role']) for item in display['owner_assignments']], [
+            ('管理', 'A1'), ('成员', 'A2')])
+
+    def test_display_account_cannot_write_direct_action(self):
+        response = self.client.post('/api/actions', json={
+            'client_operation_id': 'display-write-001',
+            'action': {'intent': 'create_project', 'data': {'name': '禁止'}}
+        }, headers=self.headers(self.display))
+        self.assertEqual(response.status_code, 403)
+
     def test_wecom_incomplete_message_never_creates_fallback_after_restart(self):
         from backend.app.wecom import BotHandler
         service = self.app.state.service
@@ -39,7 +83,7 @@ class APITests(unittest.TestCase):
         handler = BotHandler(service, 'test-bot', 'https://tracker.example')
         reply = asyncio.run(handler.handle(frame, lambda _: json.dumps({'intent': 'create_project',
             'data': {}, 'missing_fields': ['name']})))
-        self.assertIn('无法处理', reply)
+        self.assertIn('未保存任何项目或事项', reply)
         later = service.clock() + timedelta(days=7)
         with patch.dict(os.environ, {'TRACKER_SHARED_USER_ID': self.admin['id']}):
             reopened = importlib.import_module('backend.app.main').create_app(self.store.path)

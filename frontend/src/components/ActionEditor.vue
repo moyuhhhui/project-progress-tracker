@@ -3,16 +3,17 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { changedFields, editableStates, errorText, intentLabels, reportData, stateLabels, today } from '../domain'
 import type { ReportForm } from '../domain'
-import type { Action, Actor, Draft, Intent, Milestone, Project, State, User } from '../types'
+import type { Action, Actor, Intent, Milestone, Project, State, User } from '../types'
 import NodeFields from './NodeFields.vue'
 import type { NodeForm } from './NodeFields.vue'
 
 const props = defineProps<{ intent: Intent; actor: Actor; project?: Project; node?: Milestone; users: User[] }>()
-const emit = defineEmits<{ close: []; draft: [draft: Draft] }>()
+const emit = defineEmits<{ close: []; saved: [] }>()
 const busy = ref(false), error = ref('')
 const isProject = computed(() => ['create_project', 'edit_project'].includes(props.intent))
 const isNode = computed(() => ['add_milestone', 'edit_milestone'].includes(props.intent))
 const isStatus = computed(() => ['project_status', 'milestone_status'].includes(props.intent))
+const isMeeting = computed(() => props.intent === 'create_meeting')
 const directory = ref<User[]>([])
 const availableUsers = computed(() => [...new Map([...props.users, ...directory.value].map(u => [u.id, u])).values()].filter(u => u.active !== false && u.active !== 0 && u.role !== 'display'))
 onMounted(async () => {
@@ -38,6 +39,7 @@ const originalNode = JSON.parse(JSON.stringify(nodeForm.value)) as Record<string
 const nodes = ref<NodeForm[]>([emptyNode()])
 const report = reactive<ReportForm>({ summary: '', progress_enabled: false, progress: props.node?.progress || 0,
   blocker: '', next_step: '', expected_date: '', clear_fields: [], historical: false, event_date: '' })
+const meetingForm = reactive({ start_at: '', title: '', location: '', notes: '', attendee_ids: [] as string[] })
 const reason = ref(''), state = ref<State>('active')
 const currentState = computed(() => props.node?.status || props.project?.status)
 const manager = computed(() => props.actor.internal_shared || props.actor.role === 'admin' || props.project?.owner_id === props.actor.id)
@@ -75,16 +77,30 @@ async function preview() {
       data = props.intent === 'add_milestone' ? { ...nodeForm.value } :
         { ...changedFields(originalNode, { ...nodeForm.value }, Object.keys(originalNode)), reason: reason.value.trim() }
     } else if (isStatus.value) data = { status: state.value, reason: reason.value.trim() }
+    else if (isMeeting.value) {
+      requireText(meetingForm.start_at, '会议开始时间')
+      data = { start_at: new Date(meetingForm.start_at).toISOString(),
+        ...(meetingForm.title.trim() ? { title: meetingForm.title.trim() } : {}),
+        ...(meetingForm.location.trim() ? { location: meetingForm.location.trim() } : {}),
+        ...(meetingForm.notes.trim() ? { notes: meetingForm.notes.trim() } : {}),
+        ...(meetingForm.attendee_ids.length ? { attendee_ids: [...meetingForm.attendee_ids] } : {}),
+        ...(props.project ? { project_id: props.project.id } : {}) }
+    }
     else {
       requireText(report.summary, '进展说明')
       if (report.historical) requireText(report.event_date, '历史发生日期')
       data = reportData(report)
     }
+    if (['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(props.intent)) requireText(reason.value, '变更原因')
     const action: Action = { intent: props.intent, data,
       ...(props.project ? { project_id: props.project.id } : {}), ...(props.node ? { milestone_id: props.node.id } : {}) }
     busy.value = true
-    const draft = await api<Draft>('/api/drafts', 'POST', action)
-    emit('draft', draft); emit('close')
+    await api('/api/actions', 'POST', {
+      action,
+      client_operation_id: crypto.randomUUID(),
+      ...(props.project?.version ? { expected_version: props.project.version } : {}),
+    })
+    emit('saved'); emit('close')
   } catch (e) { error.value = errorText(e) }
   finally { busy.value = false }
 }
@@ -99,7 +115,7 @@ async function preview() {
         <div class="form-grid"><el-form-item label="对接单位（选填）"><el-input v-model="projectForm.contact_company" maxlength="100" placeholder="客户或合作单位" /></el-form-item><el-form-item label="对接人（选填）"><el-input v-model="projectForm.contact_name" maxlength="100" placeholder="姓名或称呼" /></el-form-item></div>
         <el-form-item label="联系方式（选填）"><el-input v-model="projectForm.contact_info" maxlength="200" placeholder="电话、微信或邮箱" /></el-form-item>
         <div class="form-grid"><el-form-item label="项目负责人（选填）"><el-input v-if="actor.internal_shared" v-model="projectForm.owner_name" maxlength="100" placeholder="直接填写姓名，无需账号" /><el-select v-else v-model="projectForm.owner_id" filterable clearable><el-option v-for="u in memberOptions" :key="u.id" :label="u.name" :value="u.id" /></el-select></el-form-item><el-form-item label="项目成员"><el-select v-model="projectForm.member_ids" multiple filterable><el-option v-for="u in memberOptions" :key="u.id" :label="u.name" :value="u.id" /></el-select></el-form-item></div>
-        <div class="form-grid"><el-form-item v-for="user in nodeUsers" :key="user.id" :label="`${user.name} · 分工`"><el-select v-model="projectForm.owner_roles[user.id]" placeholder="未指定" clearable><el-option v-for="role in ['A角', 'B角', 'A1', 'A2', '主责', '搭档']" :key="role" :label="role" :value="role" /></el-select></el-form-item></div>
+        <div class="form-grid"><el-form-item v-for="user in nodeUsers" :key="user.id" :label="`${user.name} · 分工`"><el-select v-model="projectForm.owner_roles[user.id]" placeholder="未指定" clearable><el-option v-for="role in ['A', 'B', 'A1', 'A2', '主责', '搭档']" :key="role" :label="role" :value="role" /></el-select></el-form-item></div>
         <div class="form-grid"><el-form-item label="计划开始日期（选填）"><el-date-picker v-model="projectForm.start_date" value-format="YYYY-MM-DD" /></el-form-item><el-form-item label="计划截止日期（选填）"><el-date-picker v-model="projectForm.due_date" value-format="YYYY-MM-DD" /></el-form-item></div>
         <el-form-item label="公开展示"><el-switch v-model="projectForm.display_visible" active-text="在公司大屏展示项目与全部目标详情" /></el-form-item>
         <p v-if="projectForm.display_visible" class="warning-text">完整保存后，大屏会展示项目进展、阻碍与下一步。</p>
@@ -109,6 +125,13 @@ async function preview() {
         </template>
       </template>
       <NodeFields v-if="isNode" v-model="nodeForm" :users="nodeUsers" />
+      <template v-if="isMeeting">
+        <el-form-item label="会议开始时间" required><el-date-picker v-model="meetingForm.start_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" /></el-form-item>
+        <el-form-item label="会议标题"><el-input v-model="meetingForm.title" maxlength="100" placeholder="未填写时使用“未命名会议”" /></el-form-item>
+        <el-form-item label="参会成员"><el-select v-model="meetingForm.attendee_ids" multiple filterable><el-option v-for="user in availableUsers" :key="user.id" :label="user.name" :value="user.id" /></el-select></el-form-item>
+        <el-form-item label="地点"><el-input v-model="meetingForm.location" maxlength="200" /></el-form-item>
+        <el-form-item label="备注"><el-input v-model="meetingForm.notes" type="textarea" :rows="3" maxlength="2000" /></el-form-item>
+      </template>
       <template v-if="intent === 'report_progress'">
         <el-alert title="可选字段留空会保留当前值；需要移除信息时，请勾选明确清除。" type="info" :closable="false" class="section-gap" />
         <el-form-item label="本次进展说明" required><el-input v-model="report.summary" type="textarea" :rows="3" maxlength="2000" placeholder="完成了什么，或说明仍在等待的原因" /></el-form-item>
@@ -126,7 +149,7 @@ async function preview() {
         <el-alert v-if="state === 'completed'" :title="node ? `请核对完成标准：${node.criterion}` : '项目完成需要所有未取消的目标均已完成。'" type="warning" :closable="false" class="section-gap" />
         <el-alert v-if="state === 'paused'" title="暂停不会自动顺延计划截止日期。" type="info" :closable="false" class="section-gap" />
       </template>
-      <el-form-item v-if="['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(intent)" :label="isStatus && state === 'paused' ? '暂停原因（选填）' : '变更原因（选填）'"><el-input v-model="reason" type="textarea" :rows="2" maxlength="1000" placeholder="可填写调整或确认的依据" /></el-form-item>
+      <el-form-item v-if="['edit_project', 'edit_milestone', 'project_status', 'milestone_status'].includes(intent)" :label="isStatus && state === 'paused' ? '暂停原因' : '变更原因'" required><el-input v-model="reason" type="textarea" :rows="2" maxlength="1000" placeholder="说明调整或确认的依据" /></el-form-item>
       <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     </el-form>
     <template #footer><el-button :disabled="busy" @click="$emit('close')">返回</el-button><el-button type="primary" :loading="busy" @click="preview">保存</el-button></template>

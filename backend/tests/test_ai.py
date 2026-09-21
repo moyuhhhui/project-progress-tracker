@@ -3,14 +3,179 @@ import json
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app.ai import parse_message, prompt_context
-from backend.app.models import Action, MessageInput
+from backend.app.ai import expected_version_for, parse_message, prompt_context
+from backend.app.models import Action, MessageInput, ParsedMessage
 from backend.app.service import BusinessError, Service, TZ
 from backend.app.store import Store
+
+
+class AIDirectSaveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(Path(self.temp.name) / 'direct-save.sqlite3')
+        self.service = Service(self.store, lambda: datetime(2026, 9, 4, 10, tzinfo=TZ))
+        self.admin = self.store.add_user('管理员', 'admin')
+
+    def test_incomplete_message_returns_fields_without_persisting_business_record(self):
+        parser = lambda _: ParsedMessage(
+            intent='record_item', data={'text': '明天处理'}, missing_fields=['project_name'])
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin,
+            MessageInput(text='明天处理', client_message_id='missing-project-001'), parser))
+
+        self.assertEqual(result['kind'], 'needs_input')
+        self.assertEqual(result['missing_fields'], ['project_name'])
+        with self.store.connect() as db:
+            for table in ('projects', 'audit', 'reports', 'drafts', 'operations', 'wecom_drafts'):
+                with self.subTest(table=table):
+                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+
+    def test_complete_message_returns_saved_result_without_legacy_record(self):
+        parser = lambda _: ParsedMessage(intent='create_project', data={'name': 'AI 直接项目'})
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin,
+            MessageInput(text='新建 AI 直接项目', client_message_id='ai-create-001'), parser))
+
+        self.assertEqual(result['kind'], 'saved')
+        self.assertIn('operation_id', result['result'])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
+
+    def test_production_tool_call_without_project_returns_needs_input_without_business_writes(self):
+        def invoke_tools(_, accept):
+            accept('record_project_item', {'data': {'text': '明天处理'}})
+
+        request = MessageInput(text='明天处理', client_message_id='tool-missing-project')
+        with patch('backend.app.ai.configured', return_value=True), \
+             patch('backend.app.ai.invoke_deepseek_tools', side_effect=invoke_tools):
+            result = asyncio.run(parse_message(self.service, self.admin, request))
+
+        self.assertEqual(result['kind'], 'needs_input')
+        self.assertEqual(result['missing_fields'], ['project_name'])
+        self.assertEqual(result['ambiguities'], [])
+        with self.store.connect() as db:
+            for table in ('projects', 'audit', 'reports', 'drafts', 'operations', 'wecom_drafts'):
+                with self.subTest(table=table):
+                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+
+    def test_production_clarification_tool_returns_ambiguities_without_business_writes(self):
+        test = self
+
+        class FakeRootClient:
+            @staticmethod
+            def close():
+                pass
+
+        class FakeModel:
+            root_client = FakeRootClient()
+
+            def __init__(self):
+                self.round = 0
+
+            def bind_tools(self, tools):
+                names = {tool['function']['name'] for tool in tools}
+                test.assertIn('request_clarification', names)
+                return self
+
+            def invoke(self, _):
+                self.round += 1
+                if self.round == 1:
+                    return type('Response', (), {
+                        'response_metadata': {'finish_reason': 'tool_calls'},
+                        'tool_calls': [{'id': 'clarify-1', 'name': 'request_clarification', 'args': {
+                            'missing_fields': [],
+                            'ambiguities': ['项目名称对应多个候选'],
+                        }}],
+                        'content': '',
+                    })()
+                return type('Response', (), {
+                    'response_metadata': {'finish_reason': 'stop'},
+                    'tool_calls': [],
+                    'content': 'DONE',
+                })()
+
+        request = MessageInput(text='更新这个项目', client_message_id='tool-ambiguous-project')
+        with patch('backend.app.ai.configured', return_value=True), \
+             patch.dict('os.environ', {'DEEPSEEK_MODEL': 'test-model', 'DEEPSEEK_API_KEY': 'test-key'}), \
+             patch('langchain_deepseek.ChatDeepSeek', return_value=FakeModel()):
+            result = asyncio.run(parse_message(self.service, self.admin, request))
+
+        self.assertEqual(result['kind'], 'needs_input')
+        self.assertEqual(result['missing_fields'], [])
+        self.assertEqual(result['ambiguities'], ['项目名称对应多个候选'])
+        with self.store.connect() as db:
+            for table in ('projects', 'audit', 'reports', 'drafts', 'operations', 'wecom_drafts'):
+                with self.subTest(table=table):
+                    self.assertEqual(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+
+    def test_replay_recovers_committed_single_action_after_response_cache_interruption(self):
+        request = MessageInput(text='新建中断恢复项目', client_message_id='recover-committed-action')
+        raw = json.dumps({'intent': 'create_project', 'data': {'name': '中断恢复项目'}})
+        execute_action = self.service.execute_action
+        committed = {}
+
+        def commit_then_stop(*args, **kwargs):
+            committed['result'] = execute_action(*args, **kwargs)
+            raise SystemExit('模拟业务提交后进程退出')
+
+        with patch.object(self.service, 'execute_action', side_effect=commit_then_stop), \
+             self.assertRaises(SystemExit):
+            asyncio.run(parse_message(self.service, self.admin, request, lambda _: raw))
+
+        restarted = Service(Store(self.store.path), self.service.clock)
+        replayed = asyncio.run(parse_message(
+            restarted, self.admin, request,
+            lambda _: self.fail('重放不应再次调用模型或执行业务写入')))
+
+        self.assertEqual(replayed, {'kind': 'saved', 'result': committed['result']})
+        with self.assertRaises(BusinessError) as changed:
+            asyncio.run(parse_message(
+                restarted, self.admin,
+                MessageInput(text='不同内容', client_message_id=request.client_message_id),
+                lambda _: self.fail('冲突消息不应调用模型')))
+        self.assertEqual(changed.exception.status, 409)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM projects').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM operations').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM audit').fetchone()[0], 1)
+            message = db.execute('SELECT status,response FROM messages').fetchone()
+            self.assertEqual(message['status'], 'done')
+            self.assertIsNotNone(message['response'])
+
+    def test_replay_does_not_misreport_partially_committed_batch_as_saved(self):
+        request = MessageInput(text='新建两个项目', client_message_id='recover-partial-batch')
+        calls = [
+            {'name': 'create_project', 'arguments': {'data': {'name': '批次项目一'}}},
+            {'name': 'create_project', 'arguments': {'data': {'name': '批次项目二'}}},
+        ]
+        execute_action = self.service.execute_action
+
+        def commit_then_stop(*args, **kwargs):
+            execute_action(*args, **kwargs)
+            raise SystemExit('模拟批次首项提交后进程退出')
+
+        with patch.object(self.service, 'execute_action', side_effect=commit_then_stop), \
+             self.assertRaises(SystemExit):
+            asyncio.run(parse_message(self.service, self.admin, request, lambda _: calls))
+
+        restarted = Service(Store(self.store.path), self.service.clock)
+        with self.assertRaises(BusinessError) as caught:
+            asyncio.run(parse_message(
+                restarted, self.admin, request,
+                lambda _: self.fail('部分批次重放不应再次调用模型或误报完成')))
+
+        self.assertEqual(caught.exception.status, 409)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM projects').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM operations').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM audit').fetchone()[0], 1)
 
 
 class AITests(unittest.TestCase):
@@ -46,32 +211,31 @@ class AITests(unittest.TestCase):
             self.fail('重复消息不应重新调用模型')
         return asyncio.run(parse_message(self.service, user or self.member, request, unexpected))
 
-    def test_complete_followup_publishes_once_and_incomplete_draft_stays_off_display(self):
-        before = len(self.service.projects(self.admin, display=True))
-        request = MessageInput(text='创建项目', client_message_id='auto-create-01')
-        incomplete = asyncio.run(parse_message(self.service, self.admin, request,
-            lambda _: json.dumps({'intent': 'create_project', 'data': {}})))['draft']
-        self.assertEqual(incomplete['status'], 'needs_input')
-        self.assertEqual(len(self.service.projects(self.admin, display=True)), before)
-        complete = MessageInput(text='补齐信息', client_message_id='auto-create-02', previous_draft_id=incomplete['id'])
-        raw = json.dumps({'intent': 'create_project', 'data': {
-            'name': '新立项', 'owner_id': self.admin['id'], 'start_date': '2026-09-01', 'due_date': '2026-09-30',
-            'milestones': [{'name': '交付', 'criterion': '验收通过', 'owner_id': self.admin['id'],
-                            'start_date': '2026-09-01', 'due_date': '2026-09-30'}]}})
-        result = asyncio.run(parse_message(self.service, self.admin, complete, lambda _: raw))
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        self.assertEqual(len(self.service.projects(self.admin, display=True)), before + 1)
-        self.assertEqual(self.replay(complete, self.admin)['draft']['id'], result['draft']['id'])
-        with self.store.connect() as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM audit WHERE draft_id=?', (result['draft']['id'],)).fetchone()[0], 1)
+    def test_message_input_rejects_followup_state(self):
+        with self.assertRaises(ValueError):
+            MessageInput(text='补齐信息', client_message_id='followup-state-01',
+                         previous_draft_id='legacy-draft-id')
 
-    def test_concurrent_followups_save_only_one_successor(self):
-        from backend.app.ai import save_incomplete
-        previous = save_incomplete(self.service, self.admin, Action(intent='create_project'), '创建项目', {})
-        raw = json.dumps({'intent': 'create_project', 'data': {
-            'name': '并发立项', 'owner_id': self.admin['id'], 'start_date': '2026-09-01', 'due_date': '2026-09-30',
-            'milestones': [{'name': '节点', 'criterion': '验收', 'owner_id': self.admin['id'],
-                            'start_date': '2026-09-01', 'due_date': '2026-09-20'}]}})
+    def test_saved_message_replay_after_restart_returns_cached_result_once(self):
+        request = MessageInput(text='创建项目', client_message_id='auto-create-01')
+        raw = json.dumps({'intent': 'create_project', 'data': {'name': '新立项'}})
+
+        result = asyncio.run(parse_message(self.service, self.admin, request, lambda _: raw))
+        restarted = Service(Store(self.store.path), lambda: self.at)
+        replayed = asyncio.run(parse_message(restarted, self.admin, request,
+            lambda _: self.fail('重复消息不应重新调用模型')))
+
+        self.assertEqual(result['kind'], 'saved')
+        self.assertEqual(replayed, result)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM projects WHERE json_extract(data,'$.project_info.name')='新立项'"
+            ).fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 1)
+
+    def test_concurrent_updates_use_prompt_candidate_version(self):
+        raw = json.dumps({'intent': 'edit_project', 'project_id': self.pid,
+                          'data': {'name': '并发立项', 'reason': '更正'}})
         barrier = threading.Barrier(2)
 
         def parser(_):
@@ -80,49 +244,17 @@ class AITests(unittest.TestCase):
 
         async def concurrent():
             return await asyncio.gather(*(parse_message(self.service, self.admin,
-                MessageInput(text='补齐信息', client_message_id=f'concurrent-{i}', previous_draft_id=previous['id']), parser)
-                for i in range(2)), return_exceptions=True)
+                MessageInput(text='更正项目名称', client_message_id=f'concurrent-{i}'), parser)
+                for i in range(2)))
 
         results = asyncio.run(concurrent())
-        successes = [r for r in results if isinstance(r, dict)]
-        self.assertEqual(len(successes), 1)
-        self.assertEqual(sum(isinstance(r, BusinessError) for r in results), 1)
+        self.assertEqual(sum(result['kind'] == 'saved' for result in results), 1)
+        failed = next(result for result in results if result['kind'] == 'batch')
+        self.assertEqual(failed['business_failures'], 1)
+        self.assertIn('已被修改', failed['failures'][0]['message'])
         with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM drafts WHERE status='pending'").fetchone()[0], 0)
-        self.service.confirm(self.admin, successes[0]['draft']['id'])
-        self.assertEqual(len(self.service.projects(self.admin)), 2)
-
-    def test_incomplete_followup_after_restart_saves_once_after_seven_days(self):
-        from backend.app.ai import save_incomplete
-        previous = save_incomplete(self.service, self.admin, Action(intent='create_project'), '创建项目', {})
-        self.at += timedelta(days=7)
-        self.service = Service(Store(self.store.path), lambda: self.at)
-        request = MessageInput(text='补齐信息', client_message_id='restart-followup-01', previous_draft_id=previous['id'])
-        raw = json.dumps({'intent': 'create_project', 'data': {
-            'name': '重开页面后补齐', 'owner_id': self.admin['id'], 'start_date': '2026-09-01', 'due_date': '2026-09-30',
-            'milestones': [{'name': '交付', 'criterion': '验收通过', 'owner_id': self.admin['id'],
-                            'start_date': '2026-09-01', 'due_date': '2026-09-30'}]}})
-        result = asyncio.run(parse_message(self.service, self.admin, request, lambda _: raw))
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        self.assertEqual(self.service.draft(self.admin, previous['id'])['status'], 'cancelled')
-        self.assertEqual(self.replay(request, self.admin)['draft']['id'], result['draft']['id'])
-        self.assertEqual(len(self.service.projects(self.admin)), 2)
-
-    def test_followup_rechecks_previous_status_after_model_returns(self):
-        for command in ('cancel', 'confirm'):
-            previous = self.service.create_draft(self.admin, Action(intent='edit_project', project_id=self.pid,
-                data={'name': '新项目名称', 'reason': '修正'}))
-
-            def parser(_):
-                getattr(self.service, command)(self.admin, previous['id'])
-                return json.dumps({'intent': 'edit_project', 'project_id': self.pid,
-                                   'data': {'name': '不应生成的新草稿', 'reason': '补充'}})
-
-            with self.assertRaises(BusinessError):
-                asyncio.run(parse_message(self.service, self.admin,
-                    MessageInput(text='补充', client_message_id='while-' + command, previous_draft_id=previous['id']), parser))
-        with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM drafts WHERE status='pending'").fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 1)
+        self.assertEqual(self.service.projects(self.admin)[0]['version'], 2)
 
     def test_cached_query_filters_revoked_projects(self):
         request, result = self.request()
@@ -137,59 +269,15 @@ class AITests(unittest.TestCase):
         self.service.confirm(self.admin, draft['id'])
         self.assertEqual(self.replay(request)['projects'][0]['name'], '更新名称')
 
-    def test_tool_query_filters_mentioned_project_without_model_id(self):
-        draft = self.service.create_draft(self.admin, Action(intent='create_project', data={
-            'name': 'Second project', 'owner_id': self.admin['id'], 'member_ids': [self.member['id']],
-            'start_date': '2026-09-01', 'due_date': '2026-09-30', 'milestones': []}))
-        second_pid = self.service.confirm(self.admin, draft['id'])['project_id']
-        request = MessageInput(text=f'query project P{int(self.pid):04d}', client_message_id='tool-query-filter-no-id')
-
-        def fake_invoke(_prompt, accept):
-            accept('query_projects', {})
-
-        with patch('backend.app.ai.configured', return_value=True), \
-                patch('backend.app.ai.invoke_deepseek_tools', side_effect=fake_invoke):
-            result = asyncio.run(parse_message(self.service, self.admin, request, parser=None))
-
-        self.assertEqual([project['id'] for project in result['projects']], [self.pid])
-        self.assertNotIn(second_pid, [project['id'] for project in result['projects']])
-
-    def test_tool_query_filters_requested_project(self):
-        draft = self.service.create_draft(self.admin, Action(intent='create_project', data={
-            'name': 'Second project', 'owner_id': self.admin['id'], 'member_ids': [self.member['id']],
-            'start_date': '2026-09-01', 'due_date': '2026-09-30', 'milestones': []}))
-        second_pid = self.service.confirm(self.admin, draft['id'])['project_id']
-        request = MessageInput(text=f'query project P{int(self.pid):04d}', client_message_id='tool-query-filter')
-
-        def fake_invoke(_prompt, accept):
-            accept('query_projects', {'project_id': f'P{int(self.pid):04d}'})
-
-        with patch('backend.app.ai.configured', return_value=True), \
-                patch('backend.app.ai.invoke_deepseek_tools', side_effect=fake_invoke):
-            result = asyncio.run(parse_message(self.service, self.admin, request, parser=None))
-
-        self.assertEqual([project['id'] for project in result['projects']], [self.pid])
-        self.assertNotIn(second_pid, [project['id'] for project in result['projects']])
-
-    def test_cached_incomplete_preview_is_denied_after_revocation(self):
+    def test_cached_needs_input_result_does_not_depend_on_legacy_record(self):
         request = MessageInput(text='调整项目', client_message_id='draft-00001')
         raw = json.dumps({'intent': 'edit_project', 'project_id': self.pid, 'missing_fields': ['reason']})
         result = asyncio.run(parse_message(self.service, self.member, request, lambda _: raw))
-        self.assertEqual(result['draft']['status'], 'needs_input')
+        self.assertEqual(result['kind'], 'needs_input')
         self.revoke_membership()
-        with self.assertRaises(BusinessError) as caught:
-            self.replay(request)
-        self.assertEqual(caught.exception.status, 404)
-
-    def test_cached_preview_tracks_cancelled_status(self):
-        request, result = self.request('edit_project', self.admin, data={})
-        self.service.cancel(self.admin, result['draft']['id'])
-        self.assertEqual(self.replay(request, self.admin)['draft']['status'], 'cancelled')
-
-    def test_cached_incomplete_preview_remains_available(self):
-        request, _ = self.request('edit_project', self.admin, data={})
-        self.at += timedelta(minutes=31)
-        self.assertEqual(self.replay(request, self.admin)['draft']['status'], 'needs_input')
+        self.assertEqual(self.replay(request), result)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 2)
 
     def test_same_message_key_different_text_is_conflict(self):
         self.request()
@@ -224,7 +312,7 @@ class AITests(unittest.TestCase):
                 {'name': '小朱', 'role': 'B角', 'primary': False},
             ]}})
         result = asyncio.run(parse_message(self.service, self.admin, request, lambda _: raw, channel='wecom'))
-        self.assertEqual(result['draft']['status'], 'confirmed')
+        self.assertEqual(result['kind'], 'saved')
         project = next(p for p in self.service.projects(self.admin) if p['name'] == '美国宠物医院')
         self.assertEqual(project['owner_assignments'], [
             {'name': '小柯', 'role': 'A角', 'primary': True},
@@ -279,7 +367,11 @@ class AITests(unittest.TestCase):
             self.service, self.admin, request, lambda _: calls, channel='wecom'))
 
         self.assertEqual(result['kind'], 'batch')
-        self.assertEqual(result['succeeded'], 6)
+        self.assertEqual((result['recognized_actions'], result['saved_actions'], result['business_failures']),
+                         (6, 6, 0))
+        self.assertEqual(len(result['results']), 6)
+        self.assertTrue(all('operation_id' in item for item in result['results']))
+        self.assertNotIn('drafts', result)
         projects = self.service.projects(self.admin)
         self.assertEqual(len(projects), 7)
         saved = [project for project in projects if project['name'] in names]
@@ -293,35 +385,28 @@ class AITests(unittest.TestCase):
         ])
 
     def test_batch_reports_partial_failure_and_replay_does_not_save_again(self):
+        project = self.service.projects(self.admin)[0]
+        self.service.create_draft(self.admin, Action(
+            intent='project_status', project_id=project['id'],
+            data={'status': 'completed', 'reason': '已验收'}), auto_save=True)
         calls = [
             {'name': 'create_project', 'arguments': {'data': {'name': '批量新增项目'}}},
-            {'name': 'create_project', 'arguments': {'data': {'name': '保密展厅'}}},
+            {'name': 'record_project_item', 'arguments': {
+                'project_id': project['id'], 'data': {'text': '再记录一项安排'}}},
         ]
         request = MessageInput(text='同时新增两个项目', client_message_id='partial-batch-message')
 
         result = asyncio.run(parse_message(self.service, self.admin, request, lambda _: calls))
 
         self.assertEqual(result['kind'], 'batch')
-        self.assertEqual((result['succeeded'], result['failed']), (1, 1))
-        self.assertIn('名称冲突', result['failures'][0]['message'])
+        self.assertEqual((result['recognized_actions'], result['saved_actions'], result['business_failures']),
+                         (2, 1, 1))
+        self.assertIn('先恢复项目', result['failures'][0]['message'])
         self.assertEqual(len(self.service.projects(self.admin)), 2)
 
         replayed = self.replay(request, self.admin)
-        self.assertEqual((replayed['succeeded'], replayed['failed']), (1, 1))
+        self.assertEqual(replayed, result)
         self.assertEqual(len(self.service.projects(self.admin)), 2)
-
-    def test_group_message_without_project_never_creates_fallback_project(self):
-        from backend.app.ai import save_group_message
-        before = len(self.service.projects(self.admin))
-
-        with self.assertRaises(BusinessError):
-            save_group_message(self.service, self.admin,
-                               Action(intent='record_item', data={'text': '先记录下来'}),
-                               '先记录下来', {})
-
-        self.assertEqual(len(self.service.projects(self.admin)), before)
-        self.assertFalse(any(project['name'].startswith('待整理：')
-                             for project in self.service.projects(self.admin)))
 
     def test_model_exception_is_sanitized_and_failed_message_cannot_repeat(self):
         request = MessageInput(text='输入', client_message_id='failure-001')
@@ -346,10 +431,14 @@ class AITests(unittest.TestCase):
         self.assertEqual(self.service.projects(self.admin)[0]['version'], 1)
 
     def test_model_cannot_read_or_modify_outside_membership(self):
-        for intent in ['query', 'edit_project']:
-            with self.subTest(intent=intent), self.assertRaises(BusinessError) as caught:
-                self.request(intent, self.outsider, key=f'outsider-{intent}', data={'name': '越权', 'reason': '我是管理员'})
-            self.assertEqual(caught.exception.status, 404)
+        with self.assertRaises(BusinessError) as caught:
+            self.request('query', self.outsider, key='outsider-query')
+        self.assertEqual(caught.exception.status, 404)
+        _, result = self.request('edit_project', self.outsider, key='outsider-edit',
+                                 data={'name': '越权', 'reason': '我是管理员'})
+        self.assertEqual(result['kind'], 'batch')
+        self.assertEqual(result['business_failures'], 1)
+        self.assertIn('不在本次可操作范围', result['failures'][0]['message'])
 
     def test_prompt_excludes_unauthorized_projects_and_credentials(self):
         prompt = prompt_context(self.service, self.outsider, '查项目')
@@ -368,187 +457,11 @@ class AITests(unittest.TestCase):
 
         prompt = prompt_context(self.service, self.admin, '；'.join(names))
         from backend.app.ai import SYSTEM
-        candidate_names = {project['name'] for project in json.loads(prompt[len(SYSTEM):])['projects']}
+        candidates = json.loads(prompt[len(SYSTEM):])['projects']
+        candidate_names = {project['name'] for project in candidates}
 
         self.assertTrue(set(names).issubset(candidate_names))
-
-    def test_prompt_matches_project_short_name_and_one_character_typo(self):
-        for name, milestones in (
-            ('锐翰科技工厂AI提效', [{'name': '开展工厂现场调研'}]),
-            ('博思智能体', [{'name': '出具方案与预算'}]),
-        ):
-            draft = self.service.create_draft(self.admin, Action(
-                intent='create_project', data={'name': name, 'milestones': milestones}))
-            self.service.confirm(self.admin, draft['id'])
-
-        prompt = prompt_context(
-            self.service, self.admin,
-            '锐翰工厂 朱浩a2，张毅a1，博斯智能体柯金成a角，朱浩b角')
-        from backend.app.ai import SYSTEM
-        candidates = json.loads(prompt[len(SYSTEM):])['projects']
-
-        self.assertTrue({'锐翰科技工厂AI提效', '博思智能体'} <=
-                        {project['name'] for project in candidates})
-
-    def test_prompt_matches_warehouse_project_name_variants(self):
-        for name, milestones in (
-            ('WMS仓储管理系统', [{'name': '完成库存盘点'}]),
-            ('仓库机器人', [{'name': '仓储管理系统调研'}]),
-        ):
-            draft = self.service.create_draft(self.admin, Action(
-                intent='create_project', data={'name': name, 'milestones': milestones}))
-            self.service.confirm(self.admin, draft['id'])
-
-        from backend.app.ai import SYSTEM
-        for index, text in enumerate(('仓储管理系统', 'WSM仓储管理系统', 'wms 仓储管理系统')):
-            with self.subTest(text=text):
-                prompt = prompt_context(self.service, self.admin, text)
-                candidates = json.loads(prompt[len(SYSTEM):])['projects']
-                self.assertIn('WMS仓储管理系统',
-                              {project['name'] for project in candidates})
-
-    def test_model_create_for_unique_alias_updates_existing_project(self):
-        draft = self.service.create_draft(self.admin, Action(intent='create_project', data={
-            'name': 'WMS仓储管理系统',
-            'owner_assignments': [{'name': '小柯', 'role': 'B角'}],
-            'milestones': [{'name': '完成库存盘点'}],
-        }))
-        project_id = self.service.confirm(self.admin, draft['id'])['project_id']
-        before = next(project for project in self.service.projects(self.admin)
-                      if project['id'] == project_id)
-        request = MessageInput(text='仓储管理系统a角张毅b角柯金成',
-                               client_message_id='warehouse-alias-update')
-        calls = [{'name': 'create_project', 'arguments': {'data': {
-            'name': '仓储管理系统',
-            'owner_assignments': [
-                {'name': '张毅', 'role': 'A角', 'primary': True},
-                {'name': '柯金成', 'role': 'B角', 'primary': False},
-            ],
-        }}}]
-
-        result = asyncio.run(parse_message(
-            self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        projects = self.service.projects(self.admin)
-        updated = next(project for project in projects if project['id'] == project_id)
-        self.assertEqual(result['draft']['action']['intent'], 'edit_project')
-        self.assertEqual(len(projects), 2)
-        self.assertEqual(updated['owner_assignments'], [
-            {'name': '张毅', 'role': 'A角', 'primary': True},
-            {'name': '柯金成', 'role': 'B角', 'primary': False},
-        ])
-        self.assertEqual(updated['milestones'], before['milestones'])
-
-    def test_ambiguous_project_alias_stops_before_saving(self):
-        for name in ('WMS仓储管理系统', 'ERP仓储管理系统'):
-            draft = self.service.create_draft(
-                self.admin, Action(intent='create_project', data={'name': name}))
-            self.service.confirm(self.admin, draft['id'])
-        before = {project['id']: project['version']
-                  for project in self.service.projects(self.admin)}
-        request = MessageInput(text='仓储管理系统a角张毅',
-                               client_message_id='ambiguous-warehouse-alias')
-        calls = [{'name': 'create_project', 'arguments': {'data': {
-            'name': '仓储管理系统',
-            'owner_assignments': [{'name': '张毅', 'role': 'A角', 'primary': True}],
-        }}}]
-
-        result = asyncio.run(parse_message(
-            self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        self.assertEqual((result['succeeded'], result['failed']), (0, 1))
-        self.assertIn('多个项目', result['failures'][0]['message'])
-        self.assertEqual(before, {project['id']: project['version']
-                                  for project in self.service.projects(self.admin)})
-
-    def test_explicit_create_rejects_existing_project_alias(self):
-        draft = self.service.create_draft(
-            self.admin, Action(intent='create_project', data={'name': 'WMS仓储管理系统'}))
-        self.service.confirm(self.admin, draft['id'])
-        before = len(self.service.projects(self.admin))
-        request = MessageInput(text='新建项目仓储管理系统',
-                               client_message_id='explicit-duplicate-alias')
-        calls = [{'name': 'create_project', 'arguments': {
-            'data': {'name': '仓储管理系统'}}}]
-
-        result = asyncio.run(parse_message(
-            self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        self.assertEqual((result['succeeded'], result['failed']), (0, 1))
-        self.assertIn('名称冲突', result['failures'][0]['message'])
-        self.assertEqual(len(self.service.projects(self.admin)), before)
-
-    def test_model_create_with_unmatched_name_still_creates_project(self):
-        request = MessageInput(text='新建项目供应链驾驶舱',
-                               client_message_id='unmatched-project-create')
-        calls = [{'name': 'create_project', 'arguments': {
-            'data': {'name': '供应链驾驶舱'}}}]
-
-        result = asyncio.run(parse_message(
-            self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        self.assertIn('供应链驾驶舱',
-                      {project['name'] for project in self.service.projects(self.admin)})
-
-    def test_shared_group_creates_distinct_warehouse_project_with_named_node_owners(self):
-        existing = self.service.create_draft(self.admin, Action(intent='create_project', data={
-            'name': 'WMS仓储管理系统', 'owner_name': '张毅', 'due_date': '2026-09-30',
-        }))
-        self.service.confirm(self.admin, existing['id'])
-        self.service.internal_shared = True
-        request = MessageInput(text='新建项目：华东仓储系统升级',
-                               client_message_id='shared-warehouse-create')
-        calls = [{'name': 'create_project', 'arguments': {'data': {
-            'name': '华东仓储系统升级',
-            'owner_assignments': [
-                {'name': '柯金成', 'role': 'A角', 'primary': True},
-                {'name': '朱浩', 'role': 'B角', 'primary': False},
-            ],
-            'start_date': '2026-09-16', 'due_date': '2026-10-30',
-            'milestones': [
-                {'name': '完成现状调研', 'criterion': '输出调研报告', 'owner_id': '柯金成',
-                 'start_date': '2026-09-16', 'due_date': '2026-09-20'},
-                {'name': '完成系统方案设计', 'criterion': '提交系统方案', 'owner_id': '朱浩',
-                 'start_date': '2026-09-21', 'due_date': '2026-09-30'},
-            ],
-        }}}]
-
-        result = asyncio.run(parse_message(
-            self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        project = next(project for project in self.service.projects(self.admin)
-                       if project['name'] == '华东仓储系统升级')
-        self.assertEqual([node['owner_name'] for node in project['milestones']], ['柯金成', '朱浩'])
-
-    def test_multiple_project_owner_message_rejects_single_project_action(self):
-        projects = []
-        for name in ('锐翰科技工厂AI提效', '博思智能体'):
-            draft = self.service.create_draft(self.admin, Action(
-                intent='create_project', data={'name': name}))
-            project_id = self.service.confirm(self.admin, draft['id'])['project_id']
-            projects.append(self.service.projects(self.admin)[-1])
-        before = {project['id']: project['version'] for project in self.service.projects(self.admin)}
-        request = MessageInput(
-            text='锐翰工厂 朱浩a2，张毅a1，博斯智能体柯金成a角，朱浩b角',
-            client_message_id='mixed-project-owners')
-        calls = [{'name': 'edit_project', 'arguments': {
-            'project_id': projects[0]['id'],
-            'data': {'owner_assignments': [
-                {'name': '朱浩', 'role': 'a2'},
-                {'name': '张毅', 'role': 'a1'},
-                {'name': '柯金成', 'role': 'a角'},
-            ], 'reason': '更新负责人分工'},
-        }}]
-
-        with self.assertRaises(BusinessError) as caught:
-            asyncio.run(parse_message(
-                self.service, self.admin, request, lambda _: calls, channel='wecom'))
-
-        self.assertIn('多个项目', caught.exception.message)
-        self.assertEqual(before, {project['id']: project['version']
-                                  for project in self.service.projects(self.admin)})
+        self.assertTrue(all(isinstance(project['version'], int) for project in candidates))
 
     def test_disable_account_during_model_query_denies_response(self):
         request = MessageInput(text='查询', client_message_id='disable-001')
@@ -560,19 +473,31 @@ class AITests(unittest.TestCase):
             asyncio.run(parse_message(self.service, self.member, request, parser))
         self.assertEqual(caught.exception.status, 403)
 
-    def test_followup_persists_and_saves_automatically(self):
+    def test_each_new_message_is_independent_after_needs_input(self):
         first = MessageInput(text='把项目改名', client_message_id='followup-01')
         raw = json.dumps({'intent': 'edit_project', 'project_id': self.pid, 'missing_fields': ['name', 'reason']})
         result = asyncio.run(parse_message(self.service, self.admin, first, lambda _: raw))
-        did = result['draft']['id']
-        second = MessageInput(text='新名称，更正', client_message_id='followup-02', previous_draft_id=did)
+        self.assertEqual(result['kind'], 'needs_input')
+        second = MessageInput(text='新名称，更正', client_message_id='followup-02')
         raw = json.dumps({'intent': 'edit_project', 'project_id': self.pid, 'data': {'name': '新名称', 'reason': '更正'}})
         result = asyncio.run(parse_message(Service(Store(self.store.path), lambda: self.at), self.admin, second, lambda _: raw))
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        self.assertEqual(self.service.draft(self.admin, did)['status'], 'cancelled')
-        self.assertEqual(result['draft']['before']['name'], '保密展厅')
+        self.assertEqual(result['kind'], 'saved')
         self.assertEqual(self.service.projects(self.admin)[0]['name'], '新名称')
+
+    def test_expected_version_uses_only_exact_candidate_matches(self):
+        candidates = [
+            {'id': '1', 'name': '北斗', 'version': 3},
+            {'id': '2', 'name': '北斗项目', 'version': 7},
+        ]
+
+        self.assertEqual(expected_version_for(
+            Action(intent='record_item', data={'project_name': ' 北斗 '}), candidates), 3)
+        self.assertEqual(expected_version_for(
+            Action(intent='edit_project', project_id='2', data={}), candidates), 7)
+        self.assertIsNone(expected_version_for(
+            Action(intent='record_item', data={'project_name': '北'}), candidates))
 
 
 if __name__ == '__main__':
     unittest.main()
+

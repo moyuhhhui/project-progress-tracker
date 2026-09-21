@@ -29,7 +29,7 @@ class InformationTests(unittest.TestCase):
 
     def test_information_creates_project_without_inventing_owner_or_dates(self):
         result = self.record('information-01', {'project_name': '北斗', 'text': '下周去北斗调研', 'time_text': '下周'})
-        self.assertEqual(result['draft']['status'], 'confirmed')
+        self.assertEqual(result['kind'], 'saved')
         project = Service(Store(self.store.path)).projects(self.user)[0]
         self.assertEqual(project['name'], '北斗')
         self.assertEqual(project['status'], 'active')
@@ -37,7 +37,7 @@ class InformationTests(unittest.TestCase):
         self.assertIsNone(project['due_date'])
         self.assertEqual(project['milestones'][0]['time_text'], '下周')
         self.assertEqual(project['milestones'][0]['summary'], '下周去北斗调研')
-        self.assertFalse(project['milestones'][0]['preparation'])
+        self.assertEqual(project['milestones'][0]['status'], 'active')
         self.assertEqual(project['flags'], [])
         self.assertEqual(scan(self.store, self.service.clock()), 0)
 
@@ -45,20 +45,23 @@ class InformationTests(unittest.TestCase):
         self.record('information-01', {'project_name': '北斗', 'text': '下周去调研'})
         data = {'project_name': '北斗', 'text': '之后再约一次技术交流'}
         result = self.record('information-02', data)
-        self.assertEqual(self.record('information-02', data)['draft']['id'], result['draft']['id'])
+        self.assertEqual(self.record('information-02', data), result)
         projects = self.service.projects(self.user)
         self.assertEqual(len(projects), 1)
         self.assertEqual([n['summary'] for n in projects[0]['milestones']], ['下周去调研', '之后再约一次技术交流'])
         self.assertEqual(projects[0]['version'], 2)
 
-    def test_unclassified_information_is_saved_and_can_be_assigned_later(self):
-        previous = self.record('information-01', {'text': '下周去交流'})['draft']
-        self.assertEqual(previous['status'], 'needs_input')
+    def test_unclassified_information_returns_needs_input_without_retaining_object(self):
+        request = MessageInput(text='下周去交流', client_message_id='information-01')
+        previous = asyncio.run(parse_message(self.service, self.user, request, lambda _: json.dumps({
+            'intent': 'record_item', 'data': {'text': '下周去交流'},
+            'missing_fields': ['project_name']})))
+        self.assertEqual(previous['kind'], 'needs_input')
         self.assertEqual(self.service.projects(self.user), [])
-        result = self.record('information-02', {'project_name': '美国宠物医院', 'text': '下周去交流'},
-                             previous_draft_id=previous['id'])
-        self.assertEqual(result['draft']['status'], 'confirmed')
-        self.assertEqual(self.service.draft(self.user, previous['id'])['status'], 'cancelled')
+        result = self.record('information-02', {'project_name': '美国宠物医院', 'text': '下周去交流'})
+        self.assertEqual(result['kind'], 'saved')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
 
     def test_date_order_still_validated_for_information(self):
         with self.assertRaises(BusinessError):
@@ -71,8 +74,9 @@ class InformationTests(unittest.TestCase):
         outsider = self.store.add_user('群成员', 'member')
         self.user = outsider
         result = self.record('outside-message', {'project_name': '美国宠物医院', 'text': '周五做出项目'})
-        self.assertEqual(result['draft']['status'], 'needs_input')
-        self.assertIsNone(result['draft']['action']['project_id'])
+        self.assertEqual(result['kind'], 'batch')
+        self.assertEqual(result['business_failures'], 1)
+        self.assertIn('无法安全关联项目', result['failures'][0]['message'])
         self.assertEqual(self.service.projects(outsider), [])
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM projects').fetchone()[0], 1)
@@ -84,7 +88,7 @@ class InformationTests(unittest.TestCase):
                 {'text': '下周五做出项目', 'title': '做出项目', 'due_date': '2026-09-11'},
                 {'text': '周日上线测试', 'title': '上线测试', 'due_date': '2026-09-13'},
             ]})
-        self.assertEqual(result['draft']['status'], 'confirmed')
+        self.assertEqual(result['kind'], 'saved')
         projects = self.service.projects(self.user)
         self.assertEqual(len(projects), 1)
         self.assertEqual([(n['name'], n['due_date']) for n in projects[0]['milestones'][1:]],
@@ -109,7 +113,7 @@ class InformationTests(unittest.TestCase):
             validate_output_data(ParsedMessage(intent='query', data={'name': '北斗'}))
         schema = output_schema()
         self.assertFalse(schema['additionalProperties'])
-        self.assertEqual(len(schema['oneOf']), 10)
+        self.assertEqual(len(schema['oneOf']), 11)
 
     def test_new_project_name_is_rechecked_at_commit(self):
         action = Action(intent='record_item', data={'project_name': '北斗', 'text': '安排'})
@@ -136,7 +140,7 @@ class InformationTests(unittest.TestCase):
         from backend.app.ai import prompt_context, SYSTEM
         created = self.record('factory-plan-01', {'project_name': '工厂项目', 'text': '下周去调研工厂',
             'title': '调研工厂', 'time_text': '下周'})
-        pid = created['draft']['result']['project_id']
+        pid = created['result']['project_id']
         project = self.service.projects(self.user)[0]
         node = project['milestones'][0]
         self.assertEqual(node['status'], 'active')
@@ -149,7 +153,7 @@ class InformationTests(unittest.TestCase):
         raw = json.dumps({'intent': 'milestone_status', 'project_id': pid, 'milestone_id': node['id'],
             'data': {'status': 'completed', 'reason': '工厂调研完成了'}})
         result = asyncio.run(parse_message(self.service, self.user, request, lambda _: raw))
-        self.assertEqual(result['draft']['status'], 'confirmed')
+        self.assertEqual(result['kind'], 'saved')
         updated = next(p for p in self.service.projects(self.user) if p['id'] == pid)
         self.assertEqual(updated['status'], project['status'])
         self.assertEqual(len(updated['milestones']), 1)

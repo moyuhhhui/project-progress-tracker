@@ -105,7 +105,7 @@ class ReminderTests(unittest.TestCase):
     def test_worker_auto_completes_untouched_item_at_due_hour_and_audits_system_source(self):
         self.edit_fixture(node={'due_date': '2026-09-04'})
         self.assertEqual(run_cycle(self.store, RecordingSender(), moment('2026-09-04T17:59')).get('auto_completed'), 0)
-        self.assertEqual(self.project()['milestones'][0]['status'], 'not_started')
+        self.assertEqual(self.project()['milestones'][0]['status'], 'active')
 
         result = run_cycle(self.store, RecordingSender(), moment('2026-09-04T18:00'))
         project = self.project()
@@ -118,7 +118,7 @@ class ReminderTests(unittest.TestCase):
         with self.store.connect() as db:
             audit = db.execute('SELECT user_id,intent,before_data,after_data FROM audit ORDER BY id DESC LIMIT 1').fetchone()
         self.assertEqual((audit['user_id'], audit['intent']), ('system:auto-complete', 'milestone_status'))
-        self.assertEqual(json.loads(audit['before_data'])['milestones'][0]['status'], 'not_started')
+        self.assertEqual(json.loads(audit['before_data'])['milestones'][0]['status'], 'active')
         self.assertEqual(json.loads(audit['after_data'])['milestones'][0]['status'], 'completed')
 
     def test_manual_progress_report_permanently_prevents_automatic_completion(self):

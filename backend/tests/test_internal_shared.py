@@ -1,5 +1,6 @@
 import importlib
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -56,27 +57,6 @@ class InternalSharedTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM users WHERE name='朱浩'").fetchone()[0], 0)
 
-    def test_project_preserves_named_milestone_owners(self):
-        response = self.client.post('/api/drafts', json={'intent': 'create_project', 'data': {
-            'name': '华东仓储系统升级',
-            'owner_assignments': [
-                {'name': '柯金成', 'role': 'A角', 'primary': True},
-                {'name': '朱浩', 'role': 'B角', 'primary': False},
-            ],
-            'start_date': '2026-09-16', 'due_date': '2026-10-30',
-            'milestones': [
-                {'name': '完成现状调研', 'criterion': '输出仓储流程调研报告并由周经理确认',
-                 'owner_id': '柯金成', 'start_date': '2026-09-16', 'due_date': '2026-09-20'},
-                {'name': '完成系统方案设计', 'criterion': '提交系统功能和数据方案',
-                 'owner_id': '朱浩', 'start_date': '2026-09-21', 'due_date': '2026-09-30'},
-            ],
-        }})
-
-        self.assertEqual(response.status_code, 200, response.text)
-        project = self.client.get('/api/projects').json()['projects'][0]
-        self.assertEqual([node['owner_name'] for node in project['milestones']], ['柯金成', '朱浩'])
-        self.assertEqual([node['owner_id'] for node in project['milestones']], [None, None])
-
     def test_delivery_completes_project_without_any_items(self):
         response = self.client.post('/api/drafts', json={'intent': 'create_project',
             'data': {'name': '无事项项目', 'status': 'active'}})
@@ -87,18 +67,28 @@ class InternalSharedTests(unittest.TestCase):
         self.assertEqual(result.json()['status'], 'confirmed')
         self.assertEqual(self.client.get('/api/projects').json()['projects'][0]['status'], 'completed')
 
-    def test_wecom_members_share_projects_and_drafts_without_manual_binding(self):
+    def test_wecom_members_share_direct_saved_projects_without_manual_binding(self):
         bot = BotHandler(self.service, 'test-bot', 'http://127.0.0.1:5173')
         first, second = bot.actor('employee-one'), bot.actor('employee-two')
-        draft = self.service.create_draft(first, Action(intent='record_item',
-            data={'project_name': '共享项目', 'text': '第一条'}), auto_save=True)
-        self.assertEqual(self.service.draft(second, draft['id'])['status'], 'confirmed')
-        next_draft = self.service.create_draft(second, Action(intent='record_item',
-            data={'project_name': '共享项目', 'text': '第二条'}), auto_save=True)
-        self.assertEqual(next_draft['result']['project_id'], draft['result']['project_id'])
+
+        def frame(msgid, userid, text):
+            return {'cmd': 'aibot_msg_callback', 'body': {'msgid': msgid,
+                'aibotid': 'test-bot', 'chatid': 'shared-group', 'chattype': 'group',
+                'from': {'userid': userid}, 'msgtype': 'text', 'text': {'content': text}}}
+
+        first_reply = asyncio.run(bot.handle(frame('shared-1', 'employee-one', '记录第一条'),
+            lambda _: json.dumps({'intent': 'record_item', 'data': {
+                'project_name': '共享项目', 'text': '第一条'}})))
+        second_reply = asyncio.run(bot.handle(frame('shared-2', 'employee-two', '记录第二条'),
+            lambda _: json.dumps({'intent': 'record_item', 'data': {
+                'project_name': '共享项目', 'text': '第二条'}})))
+
+        self.assertIn('成功保存 1 项', first_reply)
+        self.assertIn('成功保存 1 项', second_reply)
         self.assertEqual(len(self.service.projects(second)), 1)
+        self.assertEqual(len(self.service.projects(second)[0]['milestones']), 2)
         self.assertEqual(len(self.client.get('/api/projects').json()['projects']), 1)
-        self.assertEqual(len(self.client.get('/api/drafts').json()), 2)
+        self.assertEqual(self.client.get('/api/drafts').json(), [])
         self.assertEqual(bot.actor('employee-one')['id'], first['id'])
 
     def test_internal_mode_ignores_account_status_and_binding(self):
@@ -132,3 +122,4 @@ class InternalSharedTests(unittest.TestCase):
         self.assertIn('null', reply)
         self.assertNotIn('账号权限', reply)
         self.assertNotIn('登录', reply)
+

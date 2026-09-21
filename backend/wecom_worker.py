@@ -5,20 +5,12 @@ import importlib.util
 import json
 import os
 import secrets
-import sys
 from datetime import datetime, timezone
 
 from .app import ai
 from .app.service import BusinessError, Service, require
 from .app.store import Store
 from .app.wecom import BotHandler, BotRuntime, validate_web_url
-
-
-def _configure_console_encoding():
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, 'reconfigure', None)
-        if reconfigure:
-            reconfigure(encoding='utf-8', errors='replace')
 
 
 class QuietSDKLogger:
@@ -73,13 +65,13 @@ async def run_bot(service, bot_id, web_url, client, stop=None, parser=None):
         stream_id = secrets.token_hex(16)
         try:
             # 先完成平台应答；耗时模型调用在线程中运行，不阻塞 SDK 心跳。
-            await client.reply_stream(frame, stream_id, '正在整理草稿，信息齐全后自动保存；缺少的信息会提示补充。', False)
+            await client.reply_stream(frame, stream_id, '正在处理，信息齐全后直接保存；缺少关键字段会提示补充。', False)
             reply = await handler.handle(frame, parser)
             await client.reply_stream(frame, stream_id, reply or '无法识别消息身份，未修改数据。', True)
         except Exception as exc:
             set_phase('error')
             print('message_failed', type(exc).__name__, flush=True)
-            print('企业微信消息处理或回复失败，请登录网页检查草稿；未自动重发。', flush=True)
+            print('企业微信消息处理或回复失败，请登录网页刷新项目列表核对；未自动重发。', flush=True)
         finally:
             tasks.discard(task)
 
@@ -112,6 +104,7 @@ def configuration_check():
         'bot_enabled': os.getenv('TRACKER_WECOM_BOT_ENABLED') == 'true',
         'bot_id_configured': bool(os.getenv('WECOM_BOT_ID', '').strip()),
         'bot_secret_configured': bool(os.getenv('WECOM_BOT_SECRET', '').strip()),
+        'allowed_chat_ids_configured': bool(os.getenv('TRACKER_WECOM_ALLOWED_CHAT_IDS', '').strip()),
         'sdk_installed': importlib.util.find_spec('aibot') is not None,
         'ai_configured': ai.configured(),
     }

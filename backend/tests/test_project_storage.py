@@ -41,29 +41,6 @@ class ProjectStorageTests(unittest.TestCase):
             self.assertEqual(saved[2]['owner_name'], '小柯（A角）、小朱（B角）')
             self.assertEqual(len(list(path.parent.glob('tracker.sqlite3.before-owner-assignments-*.bak'))), 1)
 
-    def test_migration_uppercases_existing_structured_roles(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'tracker.sqlite3'
-            store = Store(path)
-            project = {'name': '项目', 'owner_name': '张毅（A）、朱浩（b）',
-                       'owner_assignments': [
-                           {'name': '张毅', 'role': 'A', 'primary': False},
-                           {'name': '朱浩', 'role': 'b', 'primary': False},
-                       ], 'milestones': []}
-            with store.connect(write=True) as db:
-                db.execute('INSERT INTO projects(version,data) VALUES(1,?)',
-                           (encode_project(project),))
-
-            migrated = Store(path)
-            with migrated.connect() as db:
-                saved = migrated.project(db.execute('SELECT * FROM projects').fetchone())
-
-            self.assertEqual(saved['owner_assignments'], [
-                {'name': '张毅', 'role': 'A角', 'primary': False},
-                {'name': '朱浩', 'role': 'B角', 'primary': False},
-            ])
-            self.assertEqual(saved['owner_name'], '张毅（A角）、朱浩（B角）')
-
     def test_migration_preserves_ids_dates_roles_versions_and_creates_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'tracker.sqlite3'
@@ -100,3 +77,4 @@ class ProjectStorageTests(unittest.TestCase):
                 Store(path)
             with closing(sqlite3.connect(path)) as db:
                 self.assertEqual([r[0] for r in db.execute('SELECT data FROM projects ORDER BY id')], values)
+
