@@ -87,6 +87,14 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(BusinessError):
             self.apply(project, 'edit_project', {'owner_roles': {project['owner_id']: 'C'}, 'reason': '无效角色'})
 
+    def test_project_list_resolves_owner_roles_for_display(self):
+        project = self.create_project()
+        roles = {project['owner_id']: 'A1', self.member['id']: 'A2'}
+        self.apply(project, 'edit_project', {'owner_roles': roles, 'reason': '明确分工'})
+        visible = self.service.projects(self.admin)[0]
+        self.assertEqual([(item['name'], item['role']) for item in visible['owner_assignments']],
+                         [('项目负责人', 'A1'), ('节点负责人', 'A2')])
+
     def test_record_item_merges_owner_assignments_by_name(self):
         project = self.create_project()
         project = self.apply(project, 'edit_project', {'owner_assignments': [

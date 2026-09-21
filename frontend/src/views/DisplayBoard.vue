@@ -108,5 +108,6 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
 .calendar-event.status-completed{background:#e9f6ff;border-left-color:#5ca8dd;color:#265f89}.timeline-item.status-completed{border-color:#9cc9ef;border-left-color:#5ca8dd;background:#e9f6ff;color:#265f89}.timeline-item.status-completed strong{color:#265f89}
 .timeline-item.status-active{background:#e9f6ef;border-color:#8ed0b0;color:#28775a}.timeline-item.status-active strong{color:#28775a}
 .timeline-project-block{display:flex;flex-direction:column;align-items:flex-start;gap:4px}.timeline-owners{display:flex;flex-wrap:wrap;gap:3px 6px;font-size:9px}.timeline-owners>span{display:inline-flex;align-items:center;gap:3px}.timeline-owners b,.calendar-owners b{font-size:8px;border-radius:3px;padding:0 3px}.timeline-owners b.role-primary,.calendar-owners b.role-primary{color:#3068da;background:#eef3ff}.timeline-owners b.role-secondary,.calendar-owners b.role-secondary{color:#7a54a6;background:#f3edfa}.timeline-owners b.role-neutral,.calendar-owners b.role-neutral{color:#526176;background:#ffffffb8}
+.calendar-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.calendar-grid.is-month{grid-template-columns:repeat(7,minmax(0,1fr))}
 </style>
 

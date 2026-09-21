@@ -445,6 +445,12 @@ class Service:
         projects = [p for p in projects if p['display_visible']] if display else [p for p in projects if allowed(user, p)]
         for p in projects:
             p['owner_assignments'] = p.get('owner_assignments', [])
+            if not p['owner_assignments'] and p.get('owner_roles'):
+                p['owner_assignments'] = [
+                    {'name': users.get(user_id, '成员不可用'), 'role': role,
+                     'primary': str(role).upper().startswith('A')}
+                    for user_id, role in p['owner_roles'].items()
+                ]
             p['owner_name'] = users.get(p['owner_id']) or p.get('owner_name') or '待明确'
             for n in p['milestones']:
                 n['owner_name'] = users.get(n['owner_id']) or n.get('owner_name') or '待明确'

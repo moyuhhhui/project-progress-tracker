@@ -153,20 +153,23 @@ export function calendarRowTemplate(days: { column: number; items: unknown[] }[]
     return `${Math.min(2.1, 1.5 + (count - 2) * .25)}fr`
   }).join(' ')
 }
-export function planningOverview(projects: Project[], date = today(), range?: PlanningRange, meetings: Meeting[] = []) {
+export function planningOverview(projects: Project[], date = today(), range?: PlanningRange, meetings: Meeting[] = [], users: User[] = []) {
   const offset = (days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10)
   const reference = new Date(`${date}T00:00:00Z`)
+  const mondayOffset = -((reference.getUTCDay() + 6) % 7)
+  const workWeekStart = offset(mondayOffset)
+  const workWeekEnd = offset(mondayOffset + 3)
   const rangeStart = range === 'week'
-    ? offset(-((reference.getUTCDay() + 6) % 7))
+    ? workWeekStart
     : range === 'month' ? `${date.slice(0, 7)}-01` : date
   const rangeStartDate = new Date(`${rangeStart}T00:00:00Z`)
   const endDate = range === 'week'
-    ? new Date(rangeStartDate.getTime() + 6 * 86_400_000).toISOString().slice(0, 10)
+    ? workWeekEnd
     : range === 'month'
       ? new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth() + 1, 0)).toISOString().slice(0, 10)
       : offset(9)
   const dayCount = Math.round((Date.parse(`${endDate}T00:00:00Z`) - rangeStartDate.getTime()) / 86_400_000) + 1
-  const weekEnd = offset(7)
+  const weekEnd = workWeekEnd
   const active = projects.filter(p => !['completed', 'cancelled'].includes(p.status))
   const allItems = projects.filter(p => p.status !== 'cancelled').flatMap(project => (project.milestones.length
     ? project.milestones.filter(n => n.status !== 'cancelled')
@@ -180,7 +183,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
       flags: node ? node.flags || [] : project.flags || [],
       reason: node?.pause_reason || project.pause_reason,
       owner: node?.owner_name || project.owner_name || '未分配', nextStep: node?.next_step || '',
-      owners: ownerPresentation(project, []), meeting: false,
+      owners: ownerPresentation(project, users), meeting: false,
     }))).concat(meetings.filter(meeting => meeting.status === 'active').map(meeting => {
       const start = new Date(meeting.start_at)
       const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(start)

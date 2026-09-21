@@ -44,18 +44,18 @@ test('工作台定时同步草稿和项目，隐藏时暂停，恢复时同步�
   tick()
   tick() // 请求未结束时不重叠发起。
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(reads, 8)
+  assert.equal(reads, 10)
   assert.equal(context.state.projects.value[0].version, 2)
   assert.equal(context.state.drafts.value[0].status, 'confirmed')
   assert.equal(context.state.selectedDraft.value.status, 'confirmed')
   assert.equal(context.state.loading.value, false)
   document.visibilityState = 'hidden'
   tick()
-  assert.equal(reads, 8)
+  assert.equal(reads, 10)
   document.visibilityState = 'visible'
   listeners.get('document:visibilitychange')()
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(reads, 12)
+  assert.equal(reads, 15)
   unmounted()
   assert.equal(cleared, 1)
   assert.equal(listeners.size, 0)

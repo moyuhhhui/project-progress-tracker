@@ -11,12 +11,12 @@ const props = defineProps<{ actor: Actor; projects: Project[]; users: User[]; me
 const search = ref(''), stateFilter = ref(''), riskOnly = ref(false)
 const page = ref(1), selectedId = ref('')
 const currentDate = ref(today())
-const overview = computed(() => planningOverview(props.projects, currentDate.value, undefined, props.meetings))
+const overview = computed(() => planningOverview(props.projects, currentDate.value, undefined, props.meetings, props.users))
 const timelineRange = ref<'week' | 'month'>('week')
-const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value, props.meetings))
+const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value, props.meetings, props.users))
 const mood = computed(() => projectMoodSummary(props.projects))
 const calendarStart = ref(''), calendarRange = ref<'week' | 'month'>('week')
-const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value, props.meetings))
+const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value, props.meetings, props.users))
 const undatedGroups = computed(() => props.projects.map(project => ({
   project, items: overview.value.undated.filter(item => item.projectId === project.id),
 })).filter(group => group.items.length))
@@ -133,5 +133,6 @@ function projectRowClass({ row }: { row: Project }) {
 @media(max-width:600px){.mood-summary{gap:9px}.mood-card{padding:14px}.mood-card>strong{font-size:17px}.progress-cheer{width:100%}}
 .calendar-event.status-completed{background:#e9f6ff;border-left-color:#5ca8dd;color:#265f89}.timeline-item.status-completed{border-color:#9cc9ef;background:#e9f6ff;color:#265f89}.timeline-item.status-completed strong{color:#265f89}.timeline-action.is-completed{color:#265f89;background:#e9f6ff}
 .timeline-item.status-active{background:#e9f6ef;border-color:#8ed0b0;color:#28775a}.timeline-item.status-active strong{color:#28775a}
+.calendar-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.calendar-grid.is-month{grid-template-columns:repeat(7,minmax(0,1fr))}
 </style>
 

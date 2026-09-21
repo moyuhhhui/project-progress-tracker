@@ -183,12 +183,12 @@ test('计划概览按节点日期分组，交付统计按项目去重，不包�
   const project = (id, due_date, milestones, status = 'active') => ({ id, code: `P${id}`, name: id, status, due_date, milestones })
   const node = (id, due_date, status = 'not_started') => ({ id, name: id, due_date, status })
   const result = domain.planningOverview([
-    project('1', '2026-09-11', [node('今天1', '2026-09-04'), node('今天2', '2026-09-04'), node('下周', '2026-09-11')]),
-    project('2', '2026-09-12', [node('远期', '2026-09-12'), node('旧节点', '2026-09-03')]),
+    project('1', '2026-09-03', [node('今天1', '2026-09-02'), node('今天2', '2026-09-02'), node('下周', '2026-09-03')]),
+    project('2', '2026-09-04', [node('远期', '2026-09-04'), node('旧节点', '2026-09-01')]),
     project('3', '', []),
-    project('4', '2026-09-04', [node('完成节点', '2026-09-04')], 'completed'),
-    project('5', '2026-09-04', [node('取消节点', '2026-09-04')], 'cancelled'),
-  ], '2026-09-04')
+    project('4', '2026-09-02', [node('完成节点', '2026-09-02')], 'completed'),
+    project('5', '2026-09-02', [node('取消节点', '2026-09-02')], 'cancelled'),
+  ], '2026-09-02')
   assert.deepEqual(result.counts, { today: 2, week: 1, flex: 1, total: 3 })
   assert.deepEqual(result.today.map(x => x.target), ['今天1', '今天2'])
   assert.deepEqual(result.week.map(x => x.target), ['下周'])
@@ -251,16 +251,17 @@ test('日历固定显示连续十天并保留空日期，时间轴保留十天�
   assert.equal(domain.planningOverview([], '2026-12-31').calendarDays.length, 10)
 })
 
-test('本周视图按周一至周日同时限制日历和时间轴范围', () => {
+test('周一至周四视图同时限制日历和时间轴范围', () => {
   const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
     { id: 'monday', name: '周一事项', status: 'active', due_date: '2026-09-07' },
-    { id: 'sunday', name: '周日事项', status: 'active', due_date: '2026-09-13' },
+    { id: 'thursday', name: '周四事项', status: 'active', due_date: '2026-09-10' },
+    { id: 'friday', name: '周五事项', status: 'active', due_date: '2026-09-11' },
     { id: 'next', name: '下周事项', status: 'active', due_date: '2026-09-14' },
   ] }], '2026-09-09', 'week')
   assert.equal(result.rangeStart, '2026-09-07')
-  assert.equal(result.endDate, '2026-09-13')
-  assert.equal(result.calendarDays.length, 7)
-  assert.deepEqual(result.groups.map(group => group.date), ['2026-09-07', '2026-09-13'])
+  assert.equal(result.endDate, '2026-09-10')
+  assert.equal(result.calendarDays.length, 4)
+  assert.deepEqual(result.groups.map(group => group.date), ['2026-09-07', '2026-09-10'])
 })
 
 test('本周时间轴显示范围内的已完成事项但排除范围外事项', () => {
@@ -300,6 +301,16 @@ test('日历事项携带项目结构化A角B角负责人', () => {
     { name: '小柯', role: 'A角', primary: true },
     { name: '小朱', role: 'B角', primary: false },
   ])
+})
+
+test('负责人角色通过成员目录解析为成员姓名', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', owner_name: '旧负责人文本',
+    owner_roles: { 'u1': 'A1', 'u2': 'A2' },
+    milestones: [{ id: 'item', name: '现场调研', status: 'active', due_date: '2026-09-09' }],
+  }], '2026-09-09', 'week', [], [
+    { id: 'u1', name: '张毅', active: true }, { id: 'u2', name: '朱浩', active: true },
+  ])
+  assert.deepEqual(result.calendarDays[2].items[0].owners.map(item => item.name), ['张毅', '朱浩'])
 })
 
 test('大屏月历按整周事项密度压缩空行并放大有事项行', () => {
