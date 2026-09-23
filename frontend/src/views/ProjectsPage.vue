@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Actor, Intent, Milestone, Project, User } from '../types'
 import { arrangementPresentation, editableStates, planningOverview, projectColorTone, projectMoodSummary, stateLabels, timelineEmphasis, today } from '../domain'
 import StateBadge from '../components/StateBadge.vue'
@@ -13,11 +13,11 @@ const search = ref(''), stateFilter = ref(''), riskOnly = ref(false)
 const page = ref(1), selectedId = ref('')
 const currentDate = ref(today())
 const overview = computed(() => planningOverview(props.projects, currentDate.value))
-const timelineRange = ref<'week' | 'month'>('week')
-const timelineOverview = computed(() => planningOverview(props.projects, currentDate.value, timelineRange.value))
 const mood = computed(() => projectMoodSummary(props.projects))
 const calendarStart = ref(''), calendarRange = ref<'week' | 'month'>('week')
 const calendarOverview = computed(() => planningOverview(props.projects, calendarStart.value || currentDate.value, calendarRange.value))
+const timelineOverview = calendarOverview
+const timelineScroller = ref<HTMLElement | null>(null)
 const undatedGroups = computed(() => props.projects.map(project => ({
   project, items: overview.value.undated.filter(item => item.projectId === project.id),
 })).filter(group => group.items.length))
@@ -27,6 +27,11 @@ const timelineDate = (date: string) => new Intl.DateTimeFormat('zh-CN', {
 let dateTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => { dateTimer = setInterval(() => { currentDate.value = today() }, 30_000) })
 onBeforeUnmount(() => clearInterval(dateTimer))
+watch(() => [calendarOverview.value.rangeStart, currentDate.value], async () => {
+  await nextTick()
+  timelineScroller.value?.querySelector<HTMLElement>('.timeline-group.is-today')
+    ?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' })
+}, { flush: 'post', immediate: true })
 const editor = ref<{ intent: Intent; project?: Project; node?: Milestone } | null>(null)
 const filtered = computed(() => props.projects.filter(p =>
   `${p.code} ${p.name} ${p.owner_name}`.toLowerCase().includes(search.value.toLowerCase()) &&
@@ -47,12 +52,12 @@ function projectRowClass({ row }: { row: Project }) {
     <article v-for="card in mood.cards" :key="card.tone" class="mood-card" :class="`tone-${card.tone}`"><span>{{ card.label }}</span><strong>{{ card.count }} 项</strong><small>{{ card.message }}</small></article>
   </section>
   <section v-loading="loading" class="planning-timeline" aria-label="关键时间轴">
-    <div class="timeline-heading"><h2>关键时间轴</h2><div class="range-actions"><span class="timeline-range">{{ timelineOverview.rangeStart }} — {{ timelineOverview.endDate }}</span><el-button-group><el-button :type="timelineRange === 'week' ? 'primary' : 'default'" @click="timelineRange = 'week'">本周</el-button><el-button :type="timelineRange === 'month' ? 'primary' : 'default'" @click="timelineRange = 'month'">本月</el-button></el-button-group></div></div>
-    <p class="timeline-hint">按计划截止日期排列 · 点击查看项目</p>
-    <div v-if="timelineOverview.groups.length" class="timeline">
+    <div class="timeline-heading"><h2>关键时间轴</h2><div class="range-actions"><span class="timeline-range">{{ timelineOverview.rangeStart }} — {{ timelineOverview.endDate }}</span><el-button-group><el-button :type="calendarRange === 'week' ? 'primary' : 'default'" @click="calendarRange = 'week'">本周</el-button><el-button :type="calendarRange === 'month' ? 'primary' : 'default'" @click="calendarRange = 'month'">本月</el-button></el-button-group></div></div>
+    <p class="timeline-hint">与下方日历共用日期和事项 · 横向滑动查看 · 点击查看项目</p>
+    <div v-if="timelineOverview.groups.length" ref="timelineScroller" class="timeline timeline-horizontal">
       <div v-for="group in timelineOverview.groups" :key="group.date" class="timeline-group" :class="[`timeline-${timelineEmphasis(group.date, currentDate)}`, { 'is-today': group.date === currentDate }]">
         <div class="timeline-day"><time :datetime="group.date">{{ group.date === currentDate ? '今天 · ' : '' }}{{ timelineDate(group.date) }}</time><span>{{ group.date === currentDate ? '今日安排' : `${group.items.length} 项安排` }}</span></div>
-        <div class="timeline-items"><button v-for="item in group.items" :key="item.id" class="timeline-item" :class="[`project-tone-${projectColorTone(item.projectId)}`, { 'is-overdue': group.date < currentDate, 'is-paused': item.paused }]" @click="selectedId = item.projectId"><span class="timeline-project">{{ item.code }} {{ item.projectName }}</span><span class="timeline-arrow">→</span><strong>{{ item.target }}</strong><span v-if="item.paused" class="timeline-action">暂停中</span><span v-else-if="group.date < currentDate" class="timeline-action">逾期</span></button></div>
+        <div class="timeline-items"><button v-for="item in group.items" :key="item.id" class="timeline-item" :class="[`project-tone-${projectColorTone(item.projectId)}`, `status-${arrangementPresentation(item).tone}`, { 'is-overdue': group.date < currentDate && item.status !== 'completed', 'is-paused': item.paused }]" @click="selectedId = item.projectId"><span class="timeline-project">{{ item.code }} {{ item.projectName }}</span><span class="timeline-arrow">→</span><strong>{{ item.target }}</strong><span v-if="item.paused" class="timeline-action">暂停中</span><span v-else-if="item.status === 'completed'" class="timeline-action completed-action">已完成</span><span v-else-if="group.date < currentDate" class="timeline-action">逾期</span><span v-else-if="item.action === '安排中'" class="timeline-action">安排中</span></button><p v-if="!group.items.length" class="timeline-empty">当天暂无安排</p></div>
       </div>
     </div>
     <p v-else class="timeline-empty">{{ loading ? '正在读取事项…' : '暂无已定日期的项目事项' }}</p>
@@ -119,6 +124,10 @@ function projectRowClass({ row }: { row: Project }) {
 .timeline-items{display:flex;flex-wrap:wrap;gap:8px}.timeline-item{--timeline-tone:var(--project-tone,#60728d);display:flex;align-items:center;flex-wrap:wrap;gap:7px;max-width:100%;text-align:left;font:inherit;font-size:13px;line-height:1.6;background:var(--project-soft,#f5f7fb);border:1px solid var(--project-border,#e1e7f0);border-left:3px solid var(--timeline-tone);border-radius:9px;padding:7px 11px;cursor:pointer;box-shadow:0 3px 9px #1e3f700a;overflow-wrap:anywhere}.timeline-item:hover{border-color:var(--timeline-tone);filter:brightness(.985)}.timeline-item.is-paused{--timeline-tone:#8a93a2;border-color:#e2e5ea;background:#f7f8fa}.timeline-item:focus-visible{outline:2px solid var(--timeline-tone);outline-offset:3px}.timeline-group.timeline-near .timeline-item{padding:10px 14px;font-size:14px;box-shadow:0 6px 16px #1e3f7010}.timeline-group.timeline-near .timeline-item strong{font-size:14px}.timeline-group.timeline-far{opacity:.5}.timeline-group.timeline-far .timeline-item{padding:5px 9px;font-size:12px;box-shadow:none}
 .timeline-project{color:var(--project-tone,#526176);background:#ffffffa8;border:1px solid var(--project-border,#e1e7f0);border-radius:5px;padding:1px 6px}.timeline-arrow{color:#99a5b5}.timeline-item strong{color:var(--project-tone,#526176);font-weight:600}.timeline-item.is-paused strong{color:#606b7b}.timeline-action{font-size:10px;color:#b43e48;background:#fdebed;border-radius:4px;padding:1px 6px}.timeline-action.start{color:#327d5d;background:#eaf6f0}.timeline-owner{font-size:11px;color:#8a95a6}.timeline-empty{font-size:13px;color:#8a95a6;padding:14px 0 4px;margin:0}
 @media(max-width:600px){.planning-timeline{padding:18px 16px}.timeline-item{width:100%}.timeline-range{font-size:11px}}
+.timeline-horizontal{display:flex;gap:14px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x proximity;scrollbar-width:thin;padding:24px 8px 14px;touch-action:pan-x}.timeline-horizontal::before{left:8px;right:8px;top:8px;bottom:auto;width:auto;height:2px}
+.timeline-horizontal .timeline-group{display:flex;flex:0 0 clamp(290px,34vw,420px);flex-direction:column;gap:12px;box-sizing:border-box;margin:0;padding:16px;border:1px solid #e1e7f0;border-radius:12px;background:#fff;scroll-snap-align:center;opacity:.72}.timeline-horizontal .timeline-group::before{left:50%;top:-23px;transform:translateX(-50%)}
+.timeline-horizontal .timeline-group.is-today{flex-basis:clamp(360px,46vw,540px);margin:0;opacity:1;border-color:#43a47a;box-shadow:0 8px 24px #2674511c}.timeline-horizontal .timeline-group .timeline-day{justify-content:space-between;font-size:15px}.timeline-horizontal .timeline-group.is-today .timeline-day{font-size:19px}.timeline-horizontal .timeline-items{display:flex;flex-direction:column;gap:9px}.timeline-horizontal .timeline-item{width:100%;box-sizing:border-box;min-height:54px}.timeline-horizontal .timeline-group.is-today .timeline-item{min-height:76px;padding:13px 15px;font-size:15px}.timeline-horizontal .timeline-group.is-today .timeline-item strong{font-size:17px}.timeline-horizontal .timeline-item.status-completed{--timeline-tone:#43a47a;background:#e9f6ef;color:#28775a}.timeline-horizontal .timeline-item.status-completed strong{color:#28775a}.timeline-horizontal .timeline-action.completed-action{color:#28775a;background:#dff2e8}.timeline-horizontal .timeline-empty{margin:auto 0;text-align:center}
+@media(max-width:600px){.timeline-horizontal .timeline-group,.timeline-horizontal .timeline-group.is-today{flex-basis:82vw}.timeline-horizontal .timeline-group.is-today .timeline-item{width:100%}}
 .progress-sheet{background:#fff;border:1px solid #e1e7f0;border-radius:14px;overflow:hidden;box-shadow:0 7px 22px #1e3f7008}
 .progress-sheet .filters{padding:18px 20px;margin:0;border-bottom:1px solid #edf0f4}
 .progress-table{--el-table-header-bg-color:#fafbfc;--el-table-header-text-color:#68788f;--el-table-row-hover-bg-color:#f7faff;--el-table-border-color:#edf0f4;color:#26354a}

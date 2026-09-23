@@ -152,8 +152,6 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
   const todayItems = items.filter(item => item.date === date)
   const week = items.filter(item => item.date > date && item.date <= weekEnd)
   const flex = items.filter(item => !item.date)
-  const groups = Array.from(new Set(items.filter(item => item.date && (!range || (item.date >= rangeStart && item.date <= endDate))).map(item => item.date)))
-    .map(day => ({ date: day, items: items.filter(item => item.date === day) }))
   const inRange = (day: string) => day >= rangeStart && day <= endDate
   const upcoming = items.filter(item => !item.paused && (inRange(item.date) || inRange(item.startDate)))
     .map(item => ({ ...item, actionDate: inRange(item.date) ? item.date : item.startDate,
@@ -173,6 +171,7 @@ export function planningOverview(projects: Project[], date = today(), range?: Pl
   })
   const calendarActiveCount = new Set(calendarDays.flatMap(day => day.items)
     .filter(item => item.status !== 'completed').map(item => item.id)).size
+  const groups = calendarDays.map(day => ({ date: day.date, items: day.items }))
   return { groups, upcoming, upcomingGroups, calendarDays, calendarActiveCount, rangeStart, endDate, today: todayItems, week, flex,
     undated: allItems.filter(item => !item.date && !item.startDate),
     overdue: items.filter(item => item.date && item.date < date),

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { arrangementPresentation, calendarRowTemplate, dateTime, errorText, isSnapshotStale, planningOverview, projectColorTone, today } from '../domain'
 import type { Actor, Snapshot } from '../types'
@@ -9,11 +9,12 @@ defineProps<{ actor: Actor }>()
 const snapshot = ref<Snapshot | null>(null)
 const lastSuccess = ref<number | null>(null)
 const now = ref(Date.now()), currentDate = ref(today()), calendarStart = ref('')
-const timelineRange = ref<'week' | 'month'>('week'), calendarRange = ref<'week' | 'month'>('week')
+const calendarRange = ref<'week' | 'month'>('week')
 const loading = ref(false), error = ref('')
 const projects = computed(() => snapshot.value?.projects || [])
-const timelineOverview = computed(() => planningOverview(projects.value, currentDate.value, timelineRange.value))
 const calendarOverview = computed(() => planningOverview(projects.value, calendarStart.value || currentDate.value, calendarRange.value))
+const timelineOverview = calendarOverview
+const timelineScroller = ref<HTMLElement | null>(null)
 const calendarRows = computed(() => calendarRowTemplate(calendarOverview.value.calendarDays))
 const stale = computed(() => isSnapshotStale(lastSuccess.value, now.value))
 const time = computed(() => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false,
@@ -28,9 +29,24 @@ async function refresh() {
   try {
     snapshot.value = await api<Snapshot>('/api/display')
     lastSuccess.value = Date.now(); error.value = ''
+    if (lastSuccess.value && !timelineFocused.value) {
+      await nextTick()
+      focusToday()
+      timelineFocused.value = true
+    }
   } catch (e) { error.value = errorText(e) }
   finally { loading.value = false }
 }
+
+const timelineFocused = ref(false)
+function focusToday() {
+  timelineScroller.value?.querySelector<HTMLElement>('.timeline-group.is-today')
+    ?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+}
+watch(() => [calendarOverview.value.rangeStart, currentDate.value], async () => {
+  await nextTick()
+  focusToday()
+}, { flush: 'post' })
 
 let clockTimer: number, refreshTimer: number
 onMounted(() => {
@@ -52,16 +68,17 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
     <div v-if="!snapshot" class="board-empty">{{ loading ? '正在读取项目快照…' : '暂无成功快照，请检查连接后重试。' }}<button @click="refresh" :disabled="loading">重新读取</button></div>
     <div v-else class="board-planning">
       <section class="planning-panel timeline-panel" aria-label="关键时间轴">
-        <div class="panel-heading"><div><p class="board-kicker">TIMELINE</p><h2>关键时间轴</h2></div><div class="range-actions"><span>{{ timelineOverview.rangeStart }} — {{ timelineOverview.endDate }}</span><el-button-group><el-button :type="timelineRange === 'week' ? 'primary' : 'default'" @click="timelineRange = 'week'">本周</el-button><el-button :type="timelineRange === 'month' ? 'primary' : 'default'" @click="timelineRange = 'month'">本月</el-button></el-button-group></div></div>
-        <p class="panel-hint">按计划截止日期排列</p>
-        <div v-if="timelineOverview.groups.length" class="timeline">
+        <div class="panel-heading"><div><p class="board-kicker">TIMELINE</p><h2>关键时间轴</h2></div><div class="range-actions"><span>{{ timelineOverview.rangeStart }} — {{ timelineOverview.endDate }}</span><el-button-group><el-button :type="calendarRange === 'week' ? 'primary' : 'default'" @click="calendarRange = 'week'">本周</el-button><el-button :type="calendarRange === 'month' ? 'primary' : 'default'" @click="calendarRange = 'month'">本月</el-button></el-button-group></div></div>
+        <p class="panel-hint">与下方日历共用日期和事项 · 纵向滚动 · 含已完成事项</p>
+        <div v-if="timelineOverview.groups.length" ref="timelineScroller" class="timeline">
           <div v-for="group in timelineOverview.groups" :key="group.date" class="timeline-group" :class="{ 'is-overdue': group.date < currentDate, 'is-today': group.date === currentDate, 'is-future': group.date > currentDate }">
             <div class="timeline-day"><time :datetime="group.date">{{ group.date === currentDate ? '今天 · ' : '' }}{{ timelineDate(group.date) }}</time><span>{{ group.items.length }} 项</span></div>
             <div class="timeline-items">
-              <article v-for="item in group.items" :key="item.id" class="timeline-item" :class="[`status-${arrangementPresentation(item).tone}`, `project-tone-${projectColorTone(item.projectId)}`, { overdue: group.date < currentDate }]">
+              <article v-for="item in group.items" :key="item.id" class="timeline-item" :class="[`status-${arrangementPresentation(item).tone}`, `project-tone-${projectColorTone(item.projectId)}`, { overdue: group.date < currentDate && item.status !== 'completed' }]">
                 <span class="item-project">{{ item.code }} · {{ item.projectName }}</span><strong>{{ item.target }}</strong>
-                <div class="item-meta"><span v-if="item.owner !== '待明确'">{{ item.owner }}</span><b>{{ group.date < currentDate ? '逾期' : arrangementPresentation(item).label }}</b></div>
+                <div class="item-meta"><span v-if="item.owner !== '待明确'">{{ item.owner }}</span><b>{{ group.date < currentDate && item.status !== 'completed' ? '逾期' : arrangementPresentation(item).label }}</b></div>
               </article>
+              <p v-if="!group.items.length" class="panel-empty">当天暂无安排</p>
             </div>
           </div>
         </div>
@@ -70,7 +87,7 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
 
       <section class="planning-panel calendar-panel" aria-label="安排日历">
         <div class="panel-heading"><div><p class="board-kicker">CALENDAR</p><h2>安排日历</h2></div><div class="range-actions"><span>{{ calendarOverview.rangeStart }} — {{ calendarOverview.endDate }}</span><el-button-group><el-button :type="calendarRange === 'week' ? 'primary' : 'default'" @click="calendarRange = 'week'">本周</el-button><el-button :type="calendarRange === 'month' ? 'primary' : 'default'" @click="calendarRange = 'month'">本月</el-button></el-button-group></div></div>
-        <div class="calendar-toolbar"><p class="panel-hint">{{ calendarOverview.calendarActiveCount }} 项进行中 · 跨天事项每天展示</p><el-date-picker v-model="calendarStart" type="date" value-format="YYYY-MM-DD" placeholder="选择参考日期" aria-label="日历参考日期" clearable /></div>
+        <div class="calendar-toolbar"><p class="panel-hint">{{ calendarOverview.calendarActiveCount }} 项进行中 · 跨天事项每天展示 · 含已完成事项</p><el-date-picker v-model="calendarStart" type="date" value-format="YYYY-MM-DD" placeholder="选择参考日期" aria-label="日历参考日期" clearable /></div>
         <div class="calendar-grid" :class="{ 'is-month': calendarRange === 'month' }" :style="{ '--calendar-rows': calendarRows }">
           <section v-for="day in calendarOverview.calendarDays" :key="day.date" class="calendar-day" :class="{ 'is-today': day.date === currentDate }" :style="day.date === calendarOverview.rangeStart ? { gridColumnStart: day.column } : undefined" :aria-label="timelineDate(day.date)">
             <header class="calendar-date"><time :datetime="day.date">{{ timelineDate(day.date) }}</time><span v-if="day.date === currentDate">今天</span></header>
@@ -104,5 +121,5 @@ onBeforeUnmount(() => { [clockTimer, refreshTimer].forEach(window.clearInterval)
 @media(min-width:1800px){.display-board{padding:30px 42px}.board-planning{grid-template-columns:minmax(360px,29%) minmax(0,1fr)}.calendar-day{min-height:210px}.calendar-event>strong{font-size:14px}.item-project,.item-meta{font-size:11px}}
 @media(max-width:1000px){.display-board{height:auto;min-height:100vh;overflow:visible;padding:20px}.board-planning{grid-template-columns:1fr}.planning-panel{overflow:visible}.calendar-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.board-header{align-items:flex-start;flex-direction:column}.board-clock{align-items:flex-start}.calendar-toolbar{flex-wrap:wrap}}
 @media(max-width:1000px){.calendar-day{grid-column-start:auto!important}}
+.timeline-item.status-completed{border-color:#b9dec9;border-left-color:#43a47a;background:#e9f6ef;color:#28775a}.timeline-item.status-completed>strong{color:#28775a}
 </style>
-

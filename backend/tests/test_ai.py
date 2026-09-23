@@ -7,7 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.app.ai import expected_version_for, parse_message, prompt_context
+from backend.app.ai import (SYSTEM, TOOL_SYSTEM, expected_version_for,
+                            match_project_candidate, parse_message, prompt_context)
 from backend.app.models import Action, MessageInput, ParsedMessage
 from backend.app.service import BusinessError, Service, TZ
 from backend.app.store import Store
@@ -47,6 +48,42 @@ class AIDirectSaveTests(unittest.TestCase):
         self.assertIn('operation_id', result['result'])
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
+
+    def test_trip_alias_and_optional_people_save_as_one_continuous_item(self):
+        self.service.clock = lambda: datetime(2026, 9, 23, 10, tzinfo=TZ)
+        draft = self.service.create_draft(self.admin, Action(
+            intent='create_project', data={'name': '孝感锐翰科技工厂'}))
+        project_id = self.service.confirm(self.admin, draft['id'])['project_id']
+        parser = lambda _: ParsedMessage(intent='record_item', data={
+            'project_name': '锐翰科技',
+            'text': '两人一起出差，下周一到下周四',
+            'title': '安排出差',
+            'time_text': '下周一到下周四',
+            'start_date': '2026-09-28',
+            'due_date': '2026-10-01',
+        })
+
+        result = asyncio.run(parse_message(
+            self.service, self.admin,
+            MessageInput(text='锐翰科技，两人一起出差，下周一到下周四',
+                         client_message_id='trip-alias-001'), parser))
+
+        self.assertEqual(result['kind'], 'saved')
+        projects = self.service.projects(self.admin)
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]['id'], project_id)
+        self.assertEqual(len(projects[0]['milestones']), 1)
+        item = projects[0]['milestones'][0]
+        self.assertEqual(item['start_date'], '2026-09-28')
+        self.assertEqual(item['due_date'], '2026-10-01')
+        self.assertIsNone(item['owner_id'])
+
+    def test_prompts_do_not_require_optional_trip_details(self):
+        for system in (SYSTEM, TOOL_SYSTEM):
+            with self.subTest(system=system[:20]):
+                self.assertIn('负责人姓名', system)
+                self.assertIn('出差目的', system)
+                self.assertIn('不按天', system)
 
     def test_production_tool_call_without_project_returns_needs_input_without_business_writes(self):
         def invoke_tools(_, accept):
@@ -497,7 +534,18 @@ class AITests(unittest.TestCase):
         self.assertIsNone(expected_version_for(
             Action(intent='record_item', data={'project_name': '北'}), candidates))
 
+    def test_unique_project_name_alias_matches_but_nonunique_alias_is_rejected(self):
+        candidates = [
+            {'id': '1', 'name': '孝感锐翰科技工厂', 'version': 3},
+        ]
+        self.assertEqual(match_project_candidate('锐翰科技', candidates), candidates[0])
+        self.assertEqual(expected_version_for(
+            Action(intent='record_item', data={'project_name': '锐翰科技'}), candidates), 3)
+        with self.assertRaises(BusinessError):
+            match_project_candidate('锐翰科技', candidates + [
+                {'id': '2', 'name': '锐翰科技IT部', 'version': 1},
+            ])
+
 
 if __name__ == '__main__':
     unittest.main()
-

@@ -151,10 +151,11 @@ test('十天事项包含今天与第十天，跨月排序，排除暂停和结�
     ['今天', '2026-09-24', '截止'], ['将开始', '2026-09-25', '开始'], ['第十天', '2026-10-03', '截止'],
   ])
   assert.equal(JSON.stringify(projects), before)
-  assert.deepEqual(domain.planningOverview([], '2026-09-24').groups, [])
+  assert.deepEqual(domain.planningOverview([], '2026-09-24').groups.map(group => group.date),
+    domain.planningOverview([], '2026-09-24').calendarDays.map(day => day.date))
 })
 
-test('时间轴仅按十天内的行动日期分组，同一天合并，跨年后窗口滚动', () => {
+test('时间轴日期逐日对应日历，跨年后窗口滚动', () => {
   const projects = [{ id: 'p', status: 'active', milestones: [
     { id: 'a', name: '启动', status: 'active', start_date: '2026-12-31', due_date: '2027-02-01' },
     { id: 'b', name: '交付', status: 'active', due_date: '2026-12-31' },
@@ -166,10 +167,11 @@ test('时间轴仅按十天内的行动日期分组，同一天合并，跨年�
     [['2026-12-31', ['交付', '启动']], ['2027-01-09', ['边界']]])
   assert.deepEqual(domain.planningOverview(projects, '2027-01-01').upcomingGroups?.map(group => group.date),
     ['2027-01-09', '2027-01-10'])
-  assert.deepEqual(domain.planningOverview([], '2026-12-31').upcomingGroups, [])
+  assert.deepEqual(domain.planningOverview([], '2026-12-31').groups.map(group => group.date),
+    domain.planningOverview([], '2026-12-31').calendarDays.map(day => day.date))
 })
 
-test('日历固定显示连续十天并保留空日期，时间轴保留十天以外的节点', () => {
+test('时间轴与日历共用所选日期范围并保留空日期', () => {
   const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
     { id: 'a', name: '跨年交付', status: 'active', due_date: '2027-01-01' },
     { id: 'b', name: '远期交付', status: 'active', due_date: '2027-02-01' },
@@ -179,11 +181,27 @@ test('日历固定显示连续十天并保留空日期，时间轴保留十天�
   assert.deepEqual(result.calendarDays[0].items, [])
   assert.equal(result.calendarDays[1].items[0].target, '跨年交付')
   assert.equal(result.calendarDays[9].date, '2027-01-09')
-  assert.deepEqual(result.groups.map(group => group.date), ['2027-01-01', '2027-02-01'])
+  assert.deepEqual(result.groups.map(group => group.date), result.calendarDays.map(day => day.date))
   assert.equal(domain.planningOverview([], '2026-12-31').calendarDays.length, 10)
 })
 
-test('本周视图按周一至周日同时限制日历和时间轴范围', () => {
+test('时间轴逐日复用日历筛选结果，包含跨天和已完成事项', () => {
+  const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
+    { id: 'trip', name: '连续出差', status: 'active', start_date: '2026-09-08', due_date: '2026-09-10' },
+    { id: 'done', name: '已完成事项', status: 'completed', start_date: '2026-09-09', due_date: '2026-09-09' },
+    { id: 'paused', name: '暂停事项', status: 'paused', start_date: '2026-09-09', due_date: '2026-09-09' },
+  ] }], '2026-09-09', 'week')
+  assert.deepEqual(result.groups.map(group => [group.date, group.items.map(item => item.id)]),
+    result.calendarDays.map(day => [day.date, day.items.map(item => item.id)]))
+  assert.deepEqual(result.groups.filter(group => group.items.length).map(group =>
+    [group.date, group.items.map(item => item.target)]), [
+    ['2026-09-08', ['连续出差']],
+    ['2026-09-09', ['已完成事项', '连续出差']],
+    ['2026-09-10', ['连续出差']],
+  ])
+})
+
+test('本周时间轴和日历共用周一至周日及相同事项范围', () => {
   const result = domain.planningOverview([{ id: 'p', status: 'active', milestones: [
     { id: 'monday', name: '周一事项', status: 'active', due_date: '2026-09-07' },
     { id: 'sunday', name: '周日事项', status: 'active', due_date: '2026-09-13' },
@@ -192,7 +210,7 @@ test('本周视图按周一至周日同时限制日历和时间轴范围', () =>
   assert.equal(result.rangeStart, '2026-09-07')
   assert.equal(result.endDate, '2026-09-13')
   assert.equal(result.calendarDays.length, 7)
-  assert.deepEqual(result.groups.map(group => group.date), ['2026-09-07', '2026-09-13'])
+  assert.deepEqual(result.groups.map(group => group.date), result.calendarDays.map(day => day.date))
 })
 
 test('本月视图展示当月全部日期并同时限制时间轴范围', () => {
@@ -205,7 +223,18 @@ test('本月视图展示当月全部日期并同时限制时间轴范围', () =>
   assert.equal(result.endDate, '2028-02-29')
   assert.equal(result.calendarDays.length, 29)
   assert.equal(result.calendarDays[0].column, 2)
-  assert.deepEqual(result.groups.map(group => group.date), ['2028-02-01', '2028-02-29'])
+  assert.deepEqual(result.groups.map(group => group.date), result.calendarDays.map(day => day.date))
+})
+
+test('工作台与大屏时间轴共用日历数据，但按各自方向滑动', () => {
+  const workspace = readFileSync(new URL('../src/views/ProjectsPage.vue', import.meta.url), 'utf8')
+  const board = readFileSync(new URL('../src/views/DisplayBoard.vue', import.meta.url), 'utf8')
+  assert.match(workspace, /const timelineOverview = calendarOverview/)
+  assert.match(workspace, /class="timeline timeline-horizontal"/)
+  assert.match(workspace, /scroll-snap-type:x proximity/)
+  assert.match(board, /const timelineOverview = calendarOverview/)
+  assert.match(board, /vertical-scroll|纵向滚动/)
+  assert.match(board, /timelineFocused/)
 })
 
 test('日历事项携带项目结构化A角B角负责人', () => {
